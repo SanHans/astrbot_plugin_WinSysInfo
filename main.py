@@ -217,25 +217,35 @@ def _remote_payload_to_stats(payload: dict) -> tuple[str, str, Optional[str], Op
 
     cpu_obj = payload.get("cpu")
     cpu_name = str(payload.get("cpu_name") or "").strip()
-    cpu_usage = _as_float(payload.get("cpu_percent") or payload.get("cpu_usage"))
-    cpu_temp = _as_float(payload.get("cpu_temp") or payload.get("cpu_temperature"))
+    cpu_usage_raw = payload["cpu_percent"] if "cpu_percent" in payload else payload.get("cpu_usage")
+    cpu_temp_raw = payload["cpu_temp"] if "cpu_temp" in payload else payload.get("cpu_temperature")
+    cpu_usage = _as_float(cpu_usage_raw)
+    cpu_temp = _as_float(cpu_temp_raw)
     if isinstance(cpu_obj, dict):
         cpu_name = str(cpu_obj.get("name") or cpu_name).strip()
-        cpu_usage = _as_float(cpu_obj.get("usage_percent") or cpu_obj.get("percent") or cpu_usage)
-        cpu_temp = _as_float(cpu_obj.get("temperature_c") or cpu_obj.get("temp_c") or cpu_temp)
+        cpu_usage_raw = cpu_obj["usage_percent"] if "usage_percent" in cpu_obj else cpu_obj.get("percent")
+        cpu_temp_raw = cpu_obj["temperature_c"] if "temperature_c" in cpu_obj else cpu_obj.get("temp_c")
+        cpu_usage = _as_float(cpu_usage_raw) if cpu_usage_raw is not None else cpu_usage
+        cpu_temp = _as_float(cpu_temp_raw) if cpu_temp_raw is not None else cpu_temp
 
     cpu: Optional[CpuStats] = None
     if cpu_name or cpu_usage is not None or cpu_temp is not None:
         cpu = CpuStats(name=cpu_name, usage_percent=cpu_usage, temperature_c=cpu_temp)
 
     mem_obj = payload.get("memory")
-    mem_used = _as_int(payload.get("mem_used") or payload.get("memory_used"))
-    mem_total = _as_int(payload.get("mem_total") or payload.get("memory_total"))
-    mem_percent = _as_float(payload.get("mem_percent") or payload.get("memory_percent"))
+    mem_used_raw = payload["mem_used"] if "mem_used" in payload else payload.get("memory_used")
+    mem_total_raw = payload["mem_total"] if "mem_total" in payload else payload.get("memory_total")
+    mem_percent_raw = payload["mem_percent"] if "mem_percent" in payload else payload.get("memory_percent")
+    mem_used = _as_int(mem_used_raw)
+    mem_total = _as_int(mem_total_raw)
+    mem_percent = _as_float(mem_percent_raw)
     if isinstance(mem_obj, dict):
-        mem_used = _as_int(mem_obj.get("used_bytes") or mem_obj.get("used") or mem_used)
-        mem_total = _as_int(mem_obj.get("total_bytes") or mem_obj.get("total") or mem_total)
-        mem_percent = _as_float(mem_obj.get("percent") or mem_percent)
+        mem_used_raw = mem_obj["used_bytes"] if "used_bytes" in mem_obj else mem_obj.get("used")
+        mem_total_raw = mem_obj["total_bytes"] if "total_bytes" in mem_obj else mem_obj.get("total")
+        mem_percent_raw = mem_obj.get("percent")
+        mem_used = _as_int(mem_used_raw) if mem_used_raw is not None else mem_used
+        mem_total = _as_int(mem_total_raw) if mem_total_raw is not None else mem_total
+        mem_percent = _as_float(mem_percent_raw) if mem_percent_raw is not None else mem_percent
 
     memory: Optional[MemoryStats] = None
     if mem_used is not None or mem_total is not None or mem_percent is not None:
@@ -248,26 +258,40 @@ def _remote_payload_to_stats(payload: dict) -> tuple[str, str, Optional[str], Op
             if not isinstance(gpu_item, dict):
                 continue
             name = str(gpu_item.get("name") or gpu_item.get("gpu_name") or "GPU").strip() or "GPU"
-            util = _as_float(
-                gpu_item.get("utilization_percent")
-                or gpu_item.get("util")
-                or gpu_item.get("percent")
+
+            util_raw = (
+                gpu_item["utilization_percent"]
+                if "utilization_percent" in gpu_item
+                else gpu_item.get("util")
+                if "util" in gpu_item
+                else gpu_item.get("percent")
             )
-            temp = _as_float(
-                gpu_item.get("temperature_c")
-                or gpu_item.get("temp_c")
-                or gpu_item.get("temperature")
+            temp_raw = (
+                gpu_item["temperature_c"]
+                if "temperature_c" in gpu_item
+                else gpu_item.get("temp_c")
+                if "temp_c" in gpu_item
+                else gpu_item.get("temperature")
             )
-            mem_used_mib = _as_int(
-                gpu_item.get("memory_used_mib")
-                or gpu_item.get("mem_used_mib")
-                or gpu_item.get("vram_used_mib")
+            mem_used_raw = (
+                gpu_item["memory_used_mib"]
+                if "memory_used_mib" in gpu_item
+                else gpu_item.get("mem_used_mib")
+                if "mem_used_mib" in gpu_item
+                else gpu_item.get("vram_used_mib")
             )
-            mem_total_mib = _as_int(
-                gpu_item.get("memory_total_mib")
-                or gpu_item.get("mem_total_mib")
-                or gpu_item.get("vram_total_mib")
+            mem_total_raw = (
+                gpu_item["memory_total_mib"]
+                if "memory_total_mib" in gpu_item
+                else gpu_item.get("mem_total_mib")
+                if "mem_total_mib" in gpu_item
+                else gpu_item.get("vram_total_mib")
             )
+
+            util = _as_float(util_raw)
+            temp = _as_float(temp_raw)
+            mem_used_mib = _as_int(mem_used_raw)
+            mem_total_mib = _as_int(mem_total_raw)
             gpus.append(
                 GpuStats(
                     name=name,
@@ -695,7 +719,7 @@ def _build_text_reply(
     "winsysinfo",
     "SanHans",
     "使用 /info 查看系统状态",
-    "0.3.5",
+    "0.3.6",
     "https://github.com/SanHans/astrbot_plugin_WinSysInfo",
 )
 class WinSysInfo(Star):

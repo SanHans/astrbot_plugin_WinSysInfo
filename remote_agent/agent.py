@@ -86,6 +86,16 @@ def _to_float_any(value: object) -> Optional[float]:
         return None
 
 
+def _to_int_any(value: object) -> Optional[int]:
+    f = _to_float_any(value)
+    if f is None:
+        return None
+    try:
+        return int(f)
+    except Exception:
+        return None
+
+
 def _env_csv(value: str) -> list[str]:
     items: list[str] = []
     for part in value.replace(";", ",").split(","):
@@ -417,9 +427,7 @@ def _pci_gpu_names() -> list[str]:
 def _non_virtual_controller_names() -> list[str]:
     names: list[str] = []
     seen: set[str] = set()
-    for c in _get_video_controllers():
-        if _is_virtual_controller(c):
-            continue
+    for c in _non_virtual_controllers():
         name = str(c.get("name") or "").strip()
         if not name:
             continue
@@ -444,6 +452,40 @@ def _looks_like_virtual_gpu_name(name: str) -> bool:
         "mirror",
     ]
     return any(w in low for w in bad)
+
+
+def _controller_vendor(pnp: str, name: str) -> str:
+    pnp_u = (pnp or "").upper()
+    name_l = (name or "").lower()
+    if "VEN_10DE" in pnp_u or "nvidia" in name_l:
+        return "nvidia"
+    if "VEN_1002" in pnp_u or "advanced micro devices" in name_l or "amd" in name_l or "ati" in name_l:
+        return "amd"
+    if "VEN_8086" in pnp_u or "intel" in name_l:
+        return "intel"
+    return "unknown"
+
+
+def _non_virtual_controllers() -> list[dict]:
+    return [c for c in _get_video_controllers() if not _is_virtual_controller(c)]
+
+
+def _non_nvidia_controller_names() -> list[str]:
+    names: list[str] = []
+    seen: set[str] = set()
+    for c in _non_virtual_controllers():
+        name = str(c.get("name") or "").strip()
+        pnp = str(c.get("pnp") or "")
+        if not name:
+            continue
+        if _controller_vendor(pnp, name) == "nvidia":
+            continue
+        low = name.lower()
+        if low in seen:
+            continue
+        seen.add(low)
+        names.append(name)
+    return names
 
 
 def _merge_gpus_by_name(gpus: list[dict]) -> list[dict]:
@@ -793,88 +835,108 @@ def status(authorization: Optional[str] = Header(default=None)) -> dict:
         cpu_percent = _pick_first(aida_values, [_aida_cpu_util_id()])
         cpu_temp_c = _pick_first(aida_values, _aida_cpu_temp_ids())
 
-        pci_names = _pci_gpu_names()
-        other_names = _non_virtual_controller_names()
+        non_nvidia_names = _non_nvidia_controller_names()
         smi = _nvidia_smi_query()
 
+        # 先收集 AIDA64 的 GPU 条目（不直接绑定具体显卡名）
+        aida_gpu_entries: list[dict] = []
         for i in range(1, 13):
             util = _pick_first(aida_values, [_aida_gpu_util_id(i)])
             temp = _pick_first(aida_values, _aida_gpu_temp_ids(i))
             used_ded = _pick_first(aida_values, [_aida_gpu_used_ded_mem_id(i)])
-            if util is None and temp is None:
+            if util is None and temp is None and used_ded is None:
                 continue
 
             bustyp = str(aida_str.get(_aida_gpu_bus_type_id(i), "")).strip().lower()
             if bustyp and any(w in bustyp for w in ("usb", "virtual", "remote")):
                 continue
 
-            if pci_names:
-                name = pci_names[i - 1] if len(pci_names) >= i else pci_names[-1]
-            elif other_names:
-                name = other_names[i - 1] if len(other_names) >= i else other_names[-1]
-            else:
-                name = f"GPU{i}"
-
-            if _looks_like_virtual_gpu_name(name):
-                continue
-
-            gpus.append(
+            aida_gpu_entries.append(
                 {
-                    "name": name,
-                    "utilization_percent": util,
-                    "temperature_c": temp,
-                    "memory_used_mib": int(used_ded) if used_ded is not None else None,
-                    "memory_total_mib": None,
+                    "index": i,
+                    "util": util,
+                    "temp": temp,
+                    "used_ded": used_ded,
                 }
             )
 
-        gpus = _merge_gpus_by_name(gpus)
+        # 1) 先把能匹配到的 NVIDIA（按显存已用）绑定到 nvidia-smi
+        matched_aida: set[int] = set()
+        used_non_nvidia_name = 0
 
-        # 如果 AIDA64 拿不到“显存总量”，对 NVIDIA 显卡用 nvidia-smi 补齐。
         if smi:
-            for g in gpus:
-                name = str(g.get("name") or "").lower()
-                mem_used = _to_float_any(g.get("memory_used_mib"))
-
-                matched = None
-
-                # 优先按显存已用匹配（最稳，避免显卡顺序错位）
-                if mem_used is not None:
-                    best_diff = None
-                    for s in smi:
-                        smi_used = _to_float_any(s.get("memory_used_mib"))
-                        if smi_used is None:
-                            continue
-                        diff = abs(float(mem_used) - float(smi_used))
-                        if best_diff is None or diff < best_diff:
-                            best_diff = diff
-                            matched = s
-                    if best_diff is not None and best_diff <= 512:
-                        if matched is not None:
-                            g["name"] = str(matched.get("name") or g.get("name"))
-                            name = str(g.get("name") or "").lower()
-                    else:
-                        matched = None
-
-                # 次选按名称包含关系（best effort）
-                if not matched and ("nvidia" in name or "tesla" in name or "geforce" in name):
-                    for s in smi:
-                        sname = str(s.get("name") or "").lower()
-                        if sname and (sname in name or name in sname):
-                            matched = s
-                            break
-
-                if not matched:
+            for s in smi:
+                smi_used = _to_float_any(s.get("memory_used_mib"))
+                if smi_used is None:
+                    continue
+                best = None
+                best_diff = None
+                for e in aida_gpu_entries:
+                    idx = int(e["index"])
+                    if idx in matched_aida:
+                        continue
+                    aida_used = _to_float_any(e.get("used_ded"))
+                    if aida_used is None:
+                        continue
+                    diff = abs(float(aida_used) - float(smi_used))
+                    if best_diff is None or diff < best_diff:
+                        best_diff = diff
+                        best = e
+                if best is None or best_diff is None or best_diff > 512:
+                    # 没找到对应的 AIDA 条目，直接用 nvidia-smi 输出一个 GPU
+                    gpus.append(
+                        {
+                            "name": str(s.get("name") or "NVIDIA GPU"),
+                            "utilization_percent": _to_float_any(s.get("utilization_percent")),
+                            "temperature_c": _to_float_any(s.get("temperature_c")),
+                            "memory_used_mib": _to_int_any(s.get("memory_used_mib")),
+                            "memory_total_mib": _to_int_any(s.get("memory_total_mib")),
+                        }
+                    )
                     continue
 
-                if g.get("memory_total_mib") is None and matched.get("memory_total_mib") is not None:
-                    g["memory_total_mib"] = matched.get("memory_total_mib")
-                if g.get("utilization_percent") is None and matched.get("utilization_percent") is not None:
-                    g["utilization_percent"] = matched.get("utilization_percent")
-                if g.get("temperature_c") is None and matched.get("temperature_c") is not None:
-                    g["temperature_c"] = matched.get("temperature_c")
-                if g.get("memory_used_mib") is None and matched.get("memory_used_mib") is not None:
-                    g["memory_used_mib"] = matched.get("memory_used_mib")
+                matched_aida.add(int(best["index"]))
+                gpus.append(
+                    {
+                        "name": str(s.get("name") or "NVIDIA GPU"),
+                        # 占用优先 AIDA（方案 2），没有就用 nvidia-smi
+                        "utilization_percent": best.get("util")
+                        if best.get("util") is not None
+                        else _to_float_any(s.get("utilization_percent")),
+                        # 温度优先 AIDA（热点温度），没有就用 nvidia-smi
+                        "temperature_c": best.get("temp")
+                        if best.get("temp") is not None
+                        else _to_float_any(s.get("temperature_c")),
+                        # 显存已用优先 AIDA（与匹配一致），总量用 nvidia-smi
+                        "memory_used_mib": _to_int_any(best.get("used_ded"))
+                        if best.get("used_ded") is not None
+                        else _to_int_any(s.get("memory_used_mib")),
+                        "memory_total_mib": _to_int_any(s.get("memory_total_mib")),
+                    }
+                )
+
+        # 2) 剩余 AIDA GPU 条目认为是非 NVIDIA（例如 AMD 核显/独显）
+        for e in aida_gpu_entries:
+            idx = int(e["index"])
+            if idx in matched_aida:
+                continue
+            name = (
+                non_nvidia_names[used_non_nvidia_name]
+                if used_non_nvidia_name < len(non_nvidia_names)
+                else f"GPU{idx}"
+            )
+            used_non_nvidia_name += 1
+            if _looks_like_virtual_gpu_name(name):
+                continue
+            gpus.append(
+                {
+                    "name": name,
+                    "utilization_percent": e.get("util"),
+                    "temperature_c": e.get("temp"),
+                    "memory_used_mib": _to_int_any(e.get("used_ded")),
+                    "memory_total_mib": None,
+                }
+            )
 
     if provider in {"auto", "hwinfo"} and (cpu_temp_c is None and not gpus):
         hw_cpu_temp, hw_gpu_temp, hw_gpu_util, hw_gpu_name = _extract_hwinfo_metrics()
