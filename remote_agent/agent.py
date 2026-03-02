@@ -121,6 +121,14 @@ def _aida_gpu_bus_type_id(index: int) -> str:
     return f"SGPU{index}BUSTYP"
 
 
+def _aida_gpu_used_ded_mem_id(index: int) -> str:
+    return f"SGPU{index}USEDDEMEM"
+
+
+def _aida_gpu_used_dyn_mem_id(index: int) -> str:
+    return f"SGPU{index}USEDDYMEM"
+
+
 def _aida_cpu_util_id() -> str:
     return "SCPUUTI"
 
@@ -143,7 +151,15 @@ def _aida_registry_values() -> dict[str, str]:
                 i += 1
                 if not name:
                     continue
-                values[str(name)] = str(data)
+                raw_name = str(name)
+                if raw_name.startswith("Label."):
+                    continue
+
+                # AIDA64 Registry 输出常见格式：Value.<ID> / Label.<ID>
+                if raw_name.startswith("Value."):
+                    raw_name = raw_name[len("Value.") :]
+
+                values[raw_name] = str(data)
             return values
     except Exception:
         return {}
@@ -161,7 +177,9 @@ def _aida_wmi_values(ids: list[str]) -> dict[str, str]:
         "$o = Get-CimInstance -Namespace root/wmi -ClassName AIDA64_SensorValues | Select-Object -First 1;"
         f"$ids = '{joined}'.Split(',');"
         "foreach ($id in $ids) {"
+        "  $v = $null;"
         "  try { $v = $o.$id } catch { $v = $null };"
+        "  if ($null -eq $v) { try { $v = $o.('Value.' + $id) } catch { $v = $null } };"
         "  if ($null -ne $v) { Write-Output ($id + '=' + $v) }"
         "}"
     )
@@ -511,6 +529,56 @@ def _pick_first(values: dict[str, float], ids: list[str]) -> Optional[float]:
     return None
 
 
+def _nvidia_smi_query() -> list[dict]:
+    """返回 nvidia-smi 查询结果（best effort）。
+
+    每项：{name, utilization_percent, temperature_c, memory_used_mib, memory_total_mib}
+    """
+    exe = shutil.which("nvidia-smi")
+    if not exe:
+        return []
+    try:
+        proc = subprocess.run(
+            [
+                exe,
+                "--query-gpu=name,utilization.gpu,temperature.gpu,memory.used,memory.total",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=2.5,
+            creationflags=_get_creationflags(),
+        )
+    except Exception:
+        return []
+
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return []
+
+    gpus: list[dict] = []
+    for line in proc.stdout.strip().splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) < 5:
+            continue
+        name = parts[0]
+        util = _to_float_any(parts[1])
+        temp = _to_float_any(parts[2])
+        mem_used = _to_float_any(parts[3])
+        mem_total = _to_float_any(parts[4])
+        gpus.append(
+            {
+                "name": name,
+                "utilization_percent": util,
+                "temperature_c": temp,
+                "memory_used_mib": int(mem_used) if mem_used is not None else None,
+                "memory_total_mib": int(mem_total) if mem_total is not None else None,
+            }
+        )
+    return gpus
+
+
 app = FastAPI(title="WinSysInfo Agent")
 
 
@@ -713,9 +781,12 @@ def status(authorization: Optional[str] = Header(default=None)) -> dict:
 
         pci_names = _pci_gpu_names()
         other_names = _non_virtual_controller_names()
+        smi = _nvidia_smi_query()
+
         for i in range(1, 13):
             util = _pick_first(aida_values, [_aida_gpu_util_id(i)])
             temp = _pick_first(aida_values, _aida_gpu_temp_ids(i))
+            used_ded = _pick_first(aida_values, [_aida_gpu_used_ded_mem_id(i)])
             if util is None and temp is None:
                 continue
 
@@ -738,10 +809,58 @@ def status(authorization: Optional[str] = Header(default=None)) -> dict:
                     "name": name,
                     "utilization_percent": util,
                     "temperature_c": temp,
+                    "memory_used_mib": int(used_ded) if used_ded is not None else None,
+                    "memory_total_mib": None,
                 }
             )
 
         gpus = _merge_gpus_by_name(gpus)
+
+        # 如果 AIDA64 拿不到“显存总量”，对 NVIDIA 显卡用 nvidia-smi 补齐。
+        if smi:
+            for g in gpus:
+                name = str(g.get("name") or "").lower()
+                mem_used = _to_float_any(g.get("memory_used_mib"))
+
+                matched = None
+
+                # 优先按显存已用匹配（最稳，避免显卡顺序错位）
+                if mem_used is not None:
+                    best_diff = None
+                    for s in smi:
+                        smi_used = _to_float_any(s.get("memory_used_mib"))
+                        if smi_used is None:
+                            continue
+                        diff = abs(float(mem_used) - float(smi_used))
+                        if best_diff is None or diff < best_diff:
+                            best_diff = diff
+                            matched = s
+                    if best_diff is not None and best_diff <= 512:
+                        if matched is not None:
+                            g["name"] = str(matched.get("name") or g.get("name"))
+                            name = str(g.get("name") or "").lower()
+                    else:
+                        matched = None
+
+                # 次选按名称包含关系（best effort）
+                if not matched and ("nvidia" in name or "tesla" in name or "geforce" in name):
+                    for s in smi:
+                        sname = str(s.get("name") or "").lower()
+                        if sname and (sname in name or name in sname):
+                            matched = s
+                            break
+
+                if not matched:
+                    continue
+
+                if g.get("memory_total_mib") is None and matched.get("memory_total_mib") is not None:
+                    g["memory_total_mib"] = matched.get("memory_total_mib")
+                if g.get("utilization_percent") is None and matched.get("utilization_percent") is not None:
+                    g["utilization_percent"] = matched.get("utilization_percent")
+                if g.get("temperature_c") is None and matched.get("temperature_c") is not None:
+                    g["temperature_c"] = matched.get("temperature_c")
+                if g.get("memory_used_mib") is None and matched.get("memory_used_mib") is not None:
+                    g["memory_used_mib"] = matched.get("memory_used_mib")
 
     if provider in {"auto", "hwinfo"} and (cpu_temp_c is None and not gpus):
         hw_cpu_temp, hw_gpu_temp, hw_gpu_util, hw_gpu_name = _extract_hwinfo_metrics()

@@ -70,6 +70,8 @@ python -m uvicorn agent:app --host 192.168.1.50 --port 8765
 - `Enable writing sensor values to Registry`（推荐，Agent 从 `HKCU\\Software\\FinalWire\\AIDA64\\SensorValues` 读取）
 - 或 `Enable writing sensor values to WMI`（Agent 从 `Root\\WMI\\AIDA64_SensorValues` 读取）
 
+说明：AIDA64 Registry/WMI 输出的键名常见格式为 `Value.<ID>` / `Label.<ID>`，Agent 已自动兼容。
+
 Agent 默认会读取：
 
 - CPU 占用：`SCPUUTI`

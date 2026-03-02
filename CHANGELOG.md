@@ -35,6 +35,11 @@
 
 - 修复：远程 AIDA64 显卡名称映射优先使用 PCI 设备，并过滤 USB/虚拟显示适配器
 
+## v0.3.4
+
+- 修复：AIDA64 Registry/WMI 的 Value.* 键名解析，恢复 GPU 占用/显存已用读取
+- 改进：NVIDIA 显卡用 nvidia-smi 补齐显存总量，并按显存已用匹配显卡名称
+
 ## v0.1.1
 
 - 新增：`CHANGELOG.md` 更新日志

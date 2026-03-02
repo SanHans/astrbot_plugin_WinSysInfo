@@ -1,6 +1,6 @@
 name: winsysinfo
 display_name: WinSysInfo
 desc: 使用 /info 查看本机或远程主机系统状态。
-version: v0.3.3
+version: v0.3.4
 author: SanHans
 repo: https://github.com/SanHans/astrbot_plugin_WinSysInfo
