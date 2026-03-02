@@ -46,4 +46,5 @@
 
 - 处理器/显卡温度与显卡占用在 Windows 下为“尽力而为”，可能显示为“暂无”。
 - NVIDIA 显卡会优先通过 `nvidia-smi` 获取占用/温度/显存。
+- 非 NVIDIA 显卡会尝试通过 Windows WMI 获取显卡名称，并通过性能计数器（GPU Engine）获取占用（若系统支持）。
 - 可选：如果你运行了 LibreHardwareMonitor 或 OpenHardwareMonitor 并启用了 WMI，本插件也会尝试通过 PowerShell 从 `root\LibreHardwareMonitor` / `root\OpenHardwareMonitor` 读取传感器数据。

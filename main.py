@@ -428,6 +428,58 @@ async def _get_hwmon_sensor_max(
     return None
 
 
+async def _get_windows_video_controller_names() -> list[str]:
+    if os.name != "nt":
+        return []
+
+    script = (
+        "$ErrorActionPreference='SilentlyContinue';"
+        "Get-CimInstance Win32_VideoController | "
+        "Select-Object -ExpandProperty Name"
+    )
+    code, out, _ = await _run_powershell(script, timeout=2.0)
+    if code != 0 or not out:
+        return []
+
+    names: list[str] = []
+    seen: set[str] = set()
+    for line in out.splitlines():
+        name = line.strip()
+        if not name:
+            continue
+        lower = name.lower()
+        if "microsoft basic display" in lower:
+            continue
+        if lower in seen:
+            continue
+        seen.add(lower)
+        names.append(name)
+    return names
+
+
+async def _get_windows_gpu_utilization_percent() -> Optional[float]:
+    if os.name != "nt":
+        return None
+
+    # Windows 性能计数器：\GPU Engine(*)\Utilization Percentage
+    # 该计数器通常需要 Win10+，返回多个 engine 实例。
+    script = (
+        "$ErrorActionPreference='SilentlyContinue';"
+        "(Get-Counter -Counter '\\GPU Engine(*)\\Utilization Percentage')." 
+        "CounterSamples | Select-Object -ExpandProperty CookedValue"
+    )
+    code, out, _ = await _run_powershell(script, timeout=2.5)
+    if code != 0 or not out:
+        return None
+
+    values = [v for v in _parse_floats(out) if 0.0 <= v <= 100.0]
+    if not values:
+        return None
+
+    # 取最大值作为整体占用的近似值（避免对多 engine 求和超过 100%）。
+    return float(max(values))
+
+
 async def _get_acpi_thermalzone_c() -> Optional[float]:
     if os.name != "nt":
         return None
@@ -520,7 +572,34 @@ async def _get_gpu_stats() -> list[GpuStats]:
     gpu_temp = await _get_hwmon_sensor_max("Temperature", "GPU")
     gpu_load = await _get_hwmon_sensor_max("Load", "GPU")
     if gpu_temp is None and gpu_load is None:
-        return []
+        # 兜底：至少拿到显卡名称（AMD/Intel 等无 nvidia-smi 的情况）
+        names = await _get_windows_video_controller_names()
+        if not names:
+            return []
+
+        util = await _get_windows_gpu_utilization_percent()
+        if len(names) == 1:
+            return [
+                GpuStats(
+                    name=names[0],
+                    utilization_percent=util,
+                    temperature_c=None,
+                    memory_used_mib=None,
+                    memory_total_mib=None,
+                )
+            ]
+
+        # 多显卡时不强行分配占用（性能计数器难以准确拆分到每张卡）
+        return [
+            GpuStats(
+                name=n,
+                utilization_percent=None,
+                temperature_c=None,
+                memory_used_mib=None,
+                memory_total_mib=None,
+            )
+            for n in names
+        ]
 
     return [
         GpuStats(
@@ -616,7 +695,7 @@ def _build_text_reply(
     "winsysinfo",
     "SanHans",
     "使用 /info 查看系统状态",
-    "0.2.1",
+    "0.2.2",
     "https://github.com/SanHans/astrbot_plugin_WinSysInfo",
 )
 class WinSysInfo(Star):

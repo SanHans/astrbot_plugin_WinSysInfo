@@ -10,6 +10,10 @@
 
 - 新增：远程 Agent 示例代码（`winsysinfo/remote_agent/`）
 
+## v0.2.2
+
+- 改进：Windows 下显卡兜底探测（WMI 显卡名称 + GPU Engine 占用）
+
 ## v0.1.1
 
 - 新增：`CHANGELOG.md` 更新日志
