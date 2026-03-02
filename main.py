@@ -792,7 +792,7 @@ class WinSysInfo(Star):
             )
         except Exception as exc:
             logger.error(f"WinSysInfo 获取指标失败: {exc!r}")
-            yield event.plain_result(f"WinSysInfo 出错：{exc}")
+            yield event.plain_result("WinSysInfo 出错：获取系统状态失败，请查看日志。")
             return
 
         cpu: Optional[CpuStats] = None
@@ -818,12 +818,13 @@ class WinSysInfo(Star):
                     show_gpu_temp=show_gpu_temp,
                     show_gpu_memory=show_gpu_memory,
                 )
-                url = await self.html_render(
+                image_path = await self.html_render(
                     STATUS_TEMPLATE,
                     image_data,
+                    return_url=False,
                     options={"type": "png", "full_page": True},
                 )
-                yield event.image_result(url)
+                yield event.image_result(image_path)
                 return
             except Exception as exc:
                 logger.error(f"WinSysInfo 图片渲染失败: {exc!r}")
