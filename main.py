@@ -743,10 +743,10 @@ def _build_image_data(
 
 @register(
     "winsysinfo",
-    "你的名字",
+    "SanHans",
     "使用 /info 查看系统状态",
     "0.1.0",
-    "https://github.com/<你的用户名>/astrbot_plugin_WinSysInfo",
+    "https://github.com/SanHans/astrbot_plugin_WinSysInfo",
 )
 class WinSysInfo(Star):
     def __init__(self, context: Context, config: Optional[AstrBotConfig] = None):
