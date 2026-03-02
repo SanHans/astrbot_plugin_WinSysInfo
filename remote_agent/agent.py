@@ -455,19 +455,33 @@ def _merge_gpus_by_name(gpus: list[dict]) -> list[dict]:
         name = str(g.get("name") or "GPU").strip() or "GPU"
         key = name.lower()
         if key not in merged:
-            merged[key] = {"name": name, "utilization_percent": None, "temperature_c": None}
+            merged[key] = {
+                "name": name,
+                "utilization_percent": None,
+                "temperature_c": None,
+                "memory_used_mib": None,
+                "memory_total_mib": None,
+            }
             order.append(key)
 
         u = _to_float_any(g.get("utilization_percent"))
         t = _to_float_any(g.get("temperature_c"))
+        mu = _to_float_any(g.get("memory_used_mib"))
+        mt = _to_float_any(g.get("memory_total_mib"))
 
         cur_u = _to_float_any(merged[key].get("utilization_percent"))
         cur_t = _to_float_any(merged[key].get("temperature_c"))
+        cur_mu = _to_float_any(merged[key].get("memory_used_mib"))
+        cur_mt = _to_float_any(merged[key].get("memory_total_mib"))
 
         if u is not None:
             merged[key]["utilization_percent"] = u if cur_u is None else max(cur_u, u)
         if t is not None:
             merged[key]["temperature_c"] = t if cur_t is None else max(cur_t, t)
+        if mu is not None:
+            merged[key]["memory_used_mib"] = int(mu) if cur_mu is None else int(max(cur_mu, mu))
+        if mt is not None:
+            merged[key]["memory_total_mib"] = int(mt) if cur_mt is None else int(max(cur_mt, mt))
 
     return [merged[k] for k in order]
 

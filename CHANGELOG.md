@@ -40,6 +40,10 @@
 - 修复：AIDA64 Registry/WMI 的 Value.* 键名解析，恢复 GPU 占用/显存已用读取
 - 改进：NVIDIA 显卡用 nvidia-smi 补齐显存总量，并按显存已用匹配显卡名称
 
+## v0.3.5
+
+- 修复：合并显卡条目时保留显存/占用字段，避免 nvidia-smi 补齐信息丢失
+
 ## v0.1.1
 
 - 新增：`CHANGELOG.md` 更新日志
