@@ -33,6 +33,8 @@
 
 远程模式需要目标主机运行一个 HTTP Agent，并提供 `GET /status`。
 
+仓库已内置远程 Agent 示例代码：`winsysinfo/remote_agent/`。
+
 - 建议仅监听局域网 IP（例如 `--host 192.168.1.50 --port 8765`），并在防火墙中仅放行内网网段。
 - 如果启用 Token，请求头使用：`Authorization: Bearer <token>`。
 

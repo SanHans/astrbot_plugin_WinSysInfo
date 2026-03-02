@@ -6,6 +6,10 @@
 - 新增：`data_source`、`remote_hosts`、`remote_default_alias` 配置项
 - 变更：移除 `output_mode` 配置项（仅文字输出）
 
+## v0.2.1
+
+- 新增：远程 Agent 示例代码（`winsysinfo/remote_agent/`）
+
 ## v0.1.1
 
 - 新增：`CHANGELOG.md` 更新日志
