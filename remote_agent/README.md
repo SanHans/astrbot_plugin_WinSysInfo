@@ -23,10 +23,10 @@ py -m pip install -r requirements.txt
 
 ## 启动（绑定 IP/端口）
 
-方式一：PowerShell 脚本启动
+方式一：bat 脚本启动（推荐）
 
-```powershell
-./run.ps1 -HostIp 192.168.1.50 -Port 8765 -Token "你的token"
+```bat
+run.bat 192.168.1.50 8765 你的token
 ```
 
 方式二：手动启动
