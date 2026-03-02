@@ -551,8 +551,12 @@ STATUS_TEMPLATE = r"""<!doctype html>
     <div class="wrap">
       <div class="top">
         <div>
-          <div class="title">WinSysInfo</div>
-          <div class="meta">{{ host }}<br />{{ os }}</div>
+          <div class="title">{{ title }}</div>
+          <div class="meta">
+            {% if show_host %}{{ host }}{% endif %}
+            {% if show_host and show_os %}<br />{% endif %}
+            {% if show_os %}{{ os }}{% endif %}
+          </div>
         </div>
         <div class="meta">
           {% if timestamp %}{{ timestamp }}{% endif %}
@@ -594,7 +598,7 @@ STATUS_TEMPLATE = r"""<!doctype html>
         <div class="card">
           <div class="card-head">
             <div class="card-title">显卡</div>
-            <div class="card-sub">{{ g.name }}</div>
+            <div class="card-sub">{% if show_gpu_name %}{{ g.name }}{% else %}状态{% endif %}</div>
           </div>
           <div class="big">{{ g.util_str }}</div>
           <div class="row">
@@ -614,7 +618,7 @@ STATUS_TEMPLATE = r"""<!doctype html>
           {% for g in gpus %}
           <div style="margin-bottom: 12px;">
             <div style="display:flex; justify-content:space-between; gap: 10px; align-items:baseline; margin-bottom:6px;">
-              <div style="font-weight:700;">{{ g.name }}</div>
+              <div style="font-weight:700;">{% if show_gpu_name %}{{ g.name }}{% else %}显卡{{ loop.index }}{% endif %}</div>
               <div style="color: var(--muted); font-size: 12px;">占用 {{ g.util_str }}{% if g.temp_str %} | 温度 {{ g.temp_str }}{% endif %}{% if g.vram_str %} | 显存 {{ g.vram_str }}{% endif %}</div>
             </div>
             <div class="bar"><div class="fill {{ g.fill_class }}" style="width: {{ g.util_pct }}%"></div></div>

@@ -11,9 +11,14 @@
 本插件通过 `_conf_schema.json` 在 AstrBot WebUI 中提供开关：
 
 - `output_mode`：`文字` / `图片`
+- `title_text`：标题文字
+- `show_host`：显示主机名
+- `show_os`：显示系统信息
+- `show_cpu_name`：显示处理器名称
 - `show_cpu_usage`：显示处理器占用
 - `show_cpu_temp`：显示处理器温度
 - `show_memory`：显示内存占用
+- `show_gpu_name`：显示显卡名称
 - `show_gpu_usage`：显示显卡占用
 - `show_gpu_temp`：显示显卡温度
 - `show_gpu_memory`：显示显存占用

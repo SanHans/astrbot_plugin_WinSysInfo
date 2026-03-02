@@ -6,6 +6,27 @@
     "default": "文字",
     "hint": "选择图片时将本地渲染并发送系统状态图。"
   },
+  "title_text": {
+    "description": "标题文字",
+    "type": "string",
+    "default": "系统状态",
+    "hint": "会显示在文字回复首行与图片顶部。"
+  },
+  "show_host": {
+    "description": "显示主机名",
+    "type": "bool",
+    "default": true
+  },
+  "show_os": {
+    "description": "显示系统信息",
+    "type": "bool",
+    "default": true
+  },
+  "show_cpu_name": {
+    "description": "显示处理器名称",
+    "type": "bool",
+    "default": true
+  },
   "show_cpu_usage": {
     "description": "显示处理器占用",
     "type": "bool",
@@ -27,6 +48,11 @@
     "type": "bool",
     "default": true,
     "hint": "优先使用 nvidia-smi；也会尝试从硬件监控 WMI 读取。"
+  },
+  "show_gpu_name": {
+    "description": "显示显卡名称",
+    "type": "bool",
+    "default": true
   },
   "show_gpu_temp": {
     "description": "显示显卡温度（尽力而为）",
