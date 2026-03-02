@@ -1,0 +1,46 @@
+{
+  "output_mode": {
+    "description": "输出方式",
+    "type": "string",
+    "options": ["文字", "图片"],
+    "default": "文字",
+    "hint": "选择图片时将生成一张美观的系统状态图。"
+  },
+  "show_cpu_usage": {
+    "description": "显示处理器占用",
+    "type": "bool",
+    "default": true
+  },
+  "show_cpu_temp": {
+    "description": "显示处理器温度（尽力而为）",
+    "type": "bool",
+    "default": true,
+    "hint": "温度依赖系统/驱动与传感器来源，可能显示为暂无。"
+  },
+  "show_memory": {
+    "description": "显示内存占用",
+    "type": "bool",
+    "default": true
+  },
+  "show_gpu_usage": {
+    "description": "显示显卡占用（尽力而为）",
+    "type": "bool",
+    "default": true,
+    "hint": "优先使用 nvidia-smi；也会尝试从硬件监控 WMI 读取。"
+  },
+  "show_gpu_temp": {
+    "description": "显示显卡温度（尽力而为）",
+    "type": "bool",
+    "default": true
+  },
+  "show_gpu_memory": {
+    "description": "显示显存占用（尽力而为）",
+    "type": "bool",
+    "default": true
+  },
+  "show_timestamp": {
+    "description": "显示时间",
+    "type": "bool",
+    "default": true
+  }
+}
