@@ -78,6 +78,8 @@ Agent 默认会读取：
 
 显卡名称会优先从 Windows 的 `Win32_VideoController` 中选择 `PNPDeviceID` 以 `PCI\\` 开头的设备，避免把 USB/虚拟显示适配器当成显卡。
 
+如果仍出现虚拟/USB 显卡条目，请确认 AIDA64 已开启 Registry 或 WMI 输出（用于读取 `SGPUxBUSTYP` 进行过滤）。
+
 可通过环境变量覆盖默认 ID 顺序：
 
 - `WINSYSINFO_AIDA64_CPU_TEMP_IDS`（逗号分隔）

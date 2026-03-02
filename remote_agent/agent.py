@@ -117,6 +117,10 @@ def _aida_gpu_util_id(index: int) -> str:
     return f"SGPU{index}UTI"
 
 
+def _aida_gpu_bus_type_id(index: int) -> str:
+    return f"SGPU{index}BUSTYP"
+
+
 def _aida_cpu_util_id() -> str:
     return "SCPUUTI"
 
@@ -298,7 +302,7 @@ def _get_video_controllers() -> list[dict]:
     script = (
         "$ErrorActionPreference='SilentlyContinue';"
         "$x = Get-CimInstance Win32_VideoController | "
-        "Select-Object Name,PNPDeviceID | ConvertTo-Json -Compress;"
+        "Select-Object Name,PNPDeviceID,AdapterCompatibility,VideoProcessor | ConvertTo-Json -Compress;"
         "if ($null -eq $x) { '' } else { $x }"
     )
     code, out, _ = _run_powershell(script, timeout=2.5)
@@ -318,6 +322,8 @@ def _get_video_controllers() -> list[dict]:
             continue
         name = str(item.get("Name") or "").strip()
         pnp = str(item.get("PNPDeviceID") or "").strip()
+        comp = str(item.get("AdapterCompatibility") or "").strip()
+        proc = str(item.get("VideoProcessor") or "").strip()
         if not name:
             continue
         low = name.lower()
@@ -327,14 +333,55 @@ def _get_video_controllers() -> list[dict]:
         if key in seen:
             continue
         seen.add(key)
-        controllers.append({"name": name, "pnp": pnp})
+        controllers.append({"name": name, "pnp": pnp, "comp": comp, "proc": proc})
     return controllers
+
+
+def _is_virtual_controller(controller: dict) -> bool:
+    name = str(controller.get("name") or "").strip().lower()
+    pnp = str(controller.get("pnp") or "").strip().upper()
+    comp = str(controller.get("comp") or "").strip().lower()
+    proc = str(controller.get("proc") or "").strip().lower()
+
+    # 明显的虚拟/远程/镜像/USB 显示适配器关键词
+    bad_words = [
+        "virtual",
+        "usb",
+        "mobile monitor",
+        "displaylink",
+        "mirror",
+        "mirage",
+        "remote",
+        "rdp",
+        "citrix",
+        "xen",
+        "hyper-v",
+        "vmware",
+        "virtualbox",
+        "parallels",
+    ]
+    if any(w in name for w in bad_words):
+        return True
+    if any(w in comp for w in ("displaylink", "citrix", "vmware", "virtualbox", "parallels")):
+        return True
+    if "displaylink" in proc:
+        return True
+
+    # PNPDeviceID 明显不是物理显卡
+    if pnp.startswith("USB\\") or pnp.startswith("ROOT\\") or pnp.startswith("SWD\\"):
+        return True
+    if "DISPLAYLINK" in pnp:
+        return True
+
+    return False
 
 
 def _pci_gpu_names() -> list[str]:
     names: list[str] = []
     seen: set[str] = set()
     for c in _get_video_controllers():
+        if _is_virtual_controller(c):
+            continue
         pnp = str(c.get("pnp") or "")
         if not pnp.upper().startswith("PCI\\"):
             continue
@@ -347,6 +394,38 @@ def _pci_gpu_names() -> list[str]:
         seen.add(low)
         names.append(name)
     return names
+
+
+def _non_virtual_controller_names() -> list[str]:
+    names: list[str] = []
+    seen: set[str] = set()
+    for c in _get_video_controllers():
+        if _is_virtual_controller(c):
+            continue
+        name = str(c.get("name") or "").strip()
+        if not name:
+            continue
+        low = name.lower()
+        if low in seen:
+            continue
+        seen.add(low)
+        names.append(name)
+    return names
+
+
+def _looks_like_virtual_gpu_name(name: str) -> bool:
+    low = (name or "").strip().lower()
+    if not low:
+        return True
+    bad = [
+        "usb mobile monitor",
+        "virtual display",
+        "displaylink",
+        "virtual",
+        "remote",
+        "mirror",
+    ]
+    return any(w in low for w in bad)
 
 
 def _merge_gpus_by_name(gpus: list[dict]) -> list[dict]:
@@ -404,6 +483,25 @@ def _aida_collect_values() -> dict[str, float]:
             values.setdefault(k, fv)
 
     return values
+
+
+def _aida_collect_strings(ids: list[str]) -> dict[str, str]:
+    """从 AIDA64 Registry/WMI 收集字符串类传感器值（例如 BUSTYP）。"""
+    out: dict[str, str] = {}
+    reg = _aida_registry_values()
+    for sid in ids:
+        if sid in reg and reg[sid] is not None:
+            out[sid] = str(reg[sid])
+
+    missing = [sid for sid in ids if sid not in out]
+    if missing:
+        wmi = _aida_wmi_values(missing)
+        for sid, val in wmi.items():
+            if val is None:
+                continue
+            out[sid] = str(val)
+
+    return out
 
 
 def _pick_first(values: dict[str, float], ids: list[str]) -> Optional[float]:
@@ -606,17 +704,35 @@ def status(authorization: Optional[str] = Header(default=None)) -> dict:
 
     if provider in {"auto", "aida64"}:
         aida_values = _aida_collect_values()
+
+        bus_type_ids = [_aida_gpu_bus_type_id(i) for i in range(1, 13)]
+        aida_str = _aida_collect_strings(bus_type_ids)
+
         cpu_percent = _pick_first(aida_values, [_aida_cpu_util_id()])
         cpu_temp_c = _pick_first(aida_values, _aida_cpu_temp_ids())
 
-        names = _get_video_controller_names()
+        pci_names = _pci_gpu_names()
+        other_names = _non_virtual_controller_names()
         for i in range(1, 13):
             util = _pick_first(aida_values, [_aida_gpu_util_id(i)])
             temp = _pick_first(aida_values, _aida_gpu_temp_ids(i))
             if util is None and temp is None:
                 continue
 
-            name = names[i - 1] if len(names) >= i else f"GPU{i}"
+            bustyp = str(aida_str.get(_aida_gpu_bus_type_id(i), "")).strip().lower()
+            if bustyp and any(w in bustyp for w in ("usb", "virtual", "remote")):
+                continue
+
+            if pci_names:
+                name = pci_names[i - 1] if len(pci_names) >= i else pci_names[-1]
+            elif other_names:
+                name = other_names[i - 1] if len(other_names) >= i else other_names[-1]
+            else:
+                name = f"GPU{i}"
+
+            if _looks_like_virtual_gpu_name(name):
+                continue
+
             gpus.append(
                 {
                     "name": name,
@@ -624,6 +740,8 @@ def status(authorization: Optional[str] = Header(default=None)) -> dict:
                     "temperature_c": temp,
                 }
             )
+
+        gpus = _merge_gpus_by_name(gpus)
 
     if provider in {"auto", "hwinfo"} and (cpu_temp_c is None and not gpus):
         hw_cpu_temp, hw_gpu_temp, hw_gpu_util, hw_gpu_name = _extract_hwinfo_metrics()
