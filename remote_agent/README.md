@@ -6,7 +6,9 @@
 
 - 支持绑定指定 IP 与端口（例如仅监听局域网网卡）
 - 可选 Token 鉴权（请求头 `Authorization: Bearer <token>`）
-- 可选：从 HWiNFO 传感器日志（CSV）读取 CPU/GPU 温度与显卡占用
+- 推荐：从 AIDA64 共享内存读取温度（无需 CSV）
+- 可选：从 AIDA64 Registry/WMI 读取占用（CPU/GPU Utilization）
+- 兜底：从 HWiNFO 传感器日志（CSV）读取温度/占用
 
 ## 安装
 
@@ -40,6 +42,7 @@ run.bat 192.168.1.50 8765 你的token "C:\path\hwinfo.csv"
 
 ```bash
 set WINSYSINFO_TOKEN=你的token
+set WINSYSINFO_PROVIDER=aida64
 python -m uvicorn agent:app --host 192.168.1.50 --port 8765
 ```
 
@@ -48,9 +51,39 @@ python -m uvicorn agent:app --host 192.168.1.50 --port 8765
 - `GET /health`：探活
 - `GET /status`：返回状态 JSON
 
+## AIDA64 共享内存（推荐）
+
+在 AIDA64 中打开：
+
+`Preferences -> Hardware Monitoring -> External Applications`
+
+勾选：
+
+- `Enable shared memory`
+
+温度将通过共享内存 `AIDA64_SensorValues` 读取。
+
+## AIDA64 占用（方案 2：来自 AIDA64）
+
+如果你希望 CPU/GPU 占用也来自 AIDA64（而不是系统兜底），需要在同一页额外勾选其一：
+
+- `Enable writing sensor values to Registry`（推荐，Agent 从 `HKCU\\Software\\FinalWire\\AIDA64\\SensorValues` 读取）
+- 或 `Enable writing sensor values to WMI`（Agent 从 `Root\\WMI\\AIDA64_SensorValues` 读取）
+
+Agent 默认会读取：
+
+- CPU 占用：`SCPUUTI`
+- GPU 占用：`SGPU1UTI`（以及 `SGPU2UTI`...）
+- GPU 温度默认优先热点：`TGPU1HOT`
+
+可通过环境变量覆盖默认 ID 顺序：
+
+- `WINSYSINFO_AIDA64_CPU_TEMP_IDS`（逗号分隔）
+- `WINSYSINFO_AIDA64_GPU_TEMP_IDS`（逗号分隔，支持模板如 `TGPU{n}HOT` 不做替换；建议只列出通用后缀）
+
 ## HWiNFO 传感器日志（推荐）
 
-如果你希望拿到更可靠的 CPU/GPU 温度与显卡占用，建议用 HWiNFO 的「传感器日志」功能输出 CSV，然后让 Agent 读取。
+当 AIDA64 未启用或无法读取时，也可以用 HWiNFO 的「传感器日志」输出 CSV 作为兜底来源。
 
 大致步骤：
 

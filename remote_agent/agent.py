@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import platform
 import socket
+import subprocess
 import time
 from typing import Optional
 
@@ -10,11 +11,339 @@ from fastapi import FastAPI, Header, HTTPException
 
 import csv
 from pathlib import Path
+import re
+import shutil
 
 try:
     import psutil  # type: ignore
 except Exception:  # pragma: no cover
     psutil = None
+
+
+def _is_windows() -> bool:
+    return os.name == "nt"
+
+
+def _get_creationflags() -> int:
+    if not _is_windows():
+        return 0
+    return getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+def _run_powershell(script: str, timeout: float = 3.0) -> tuple[int, str, str]:
+    if not _is_windows():
+        return 127, "", "not windows"
+
+    exe = None
+    for name in ("pwsh", "powershell", "powershell.exe"):
+        path = shutil.which(name)
+        if path:
+            exe = path
+            break
+    if not exe:
+        exe = "powershell.exe"
+
+    try:
+        proc = subprocess.run(
+            [
+                exe,
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                script,
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            creationflags=_get_creationflags(),
+        )
+        return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
+    except Exception as exc:
+        return 1, "", str(exc)
+
+
+def _provider() -> str:
+    return os.environ.get("WINSYSINFO_PROVIDER", "auto").strip().lower()
+
+
+def _to_float_any(value: object) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    text = text.replace("%", "").replace("C", "").replace("°", "").strip()
+    try:
+        return float(text)
+    except Exception:
+        return None
+
+
+def _env_csv(value: str) -> list[str]:
+    items: list[str] = []
+    for part in value.replace(";", ",").split(","):
+        part = part.strip()
+        if part:
+            items.append(part)
+    return items
+
+
+def _aida_cpu_temp_ids() -> list[str]:
+    return _env_csv(os.environ.get("WINSYSINFO_AIDA64_CPU_TEMP_IDS", "")) or [
+        "TCPUPKG",
+        "TCPU",
+        "TCPUTCTL",
+    ]
+
+
+def _aida_gpu_temp_ids(index: int) -> list[str]:
+    suffix = str(index)
+    # 默认优先热点温度：TGPU1HOT
+    return _env_csv(os.environ.get("WINSYSINFO_AIDA64_GPU_TEMP_IDS", "")) or [
+        f"TGPU{suffix}HOT",
+        f"TGPU{suffix}",
+        f"TGPU{suffix}DIO",
+    ]
+
+
+def _aida_gpu_util_id(index: int) -> str:
+    return f"SGPU{index}UTI"
+
+
+def _aida_cpu_util_id() -> str:
+    return "SCPUUTI"
+
+
+def _aida_registry_values() -> dict[str, str]:
+    if not _is_windows():
+        return {}
+    try:
+        import winreg  # type: ignore
+
+        key_path = r"Software\FinalWire\AIDA64\SensorValues"
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path) as key:
+            values: dict[str, str] = {}
+            i = 0
+            while True:
+                try:
+                    name, data, _ = winreg.EnumValue(key, i)
+                except OSError:
+                    break
+                i += 1
+                if not name:
+                    continue
+                values[str(name)] = str(data)
+            return values
+    except Exception:
+        return {}
+
+
+def _aida_wmi_values(ids: list[str]) -> dict[str, str]:
+    if not _is_windows() or not ids:
+        return {}
+
+    # 用 PowerShell 从 Root\WMI\AIDA64_SensorValues 读取指定属性。
+    # 输出格式：ID=value（每行一个）。
+    joined = ",".join(ids)
+    script = (
+        "$ErrorActionPreference='SilentlyContinue';"
+        "$o = Get-CimInstance -Namespace root/wmi -ClassName AIDA64_SensorValues | Select-Object -First 1;"
+        f"$ids = '{joined}'.Split(',');"
+        "foreach ($id in $ids) {"
+        "  try { $v = $o.$id } catch { $v = $null };"
+        "  if ($null -ne $v) { Write-Output ($id + '=' + $v) }"
+        "}"
+    )
+    code, out, _ = _run_powershell(script, timeout=3.0)
+    if code != 0 or not out:
+        return {}
+
+    values: dict[str, str] = {}
+    for line in out.splitlines():
+        line = line.strip()
+        if not line or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        k = k.strip()
+        if not k:
+            continue
+        values[k] = v.strip()
+    return values
+
+
+def _aida_shared_memory_text() -> str:
+    if not _is_windows():
+        return ""
+
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        OpenFileMappingW = ctypes.windll.kernel32.OpenFileMappingW
+        OpenFileMappingW.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR]
+        OpenFileMappingW.restype = wintypes.HANDLE
+
+        MapViewOfFile = ctypes.windll.kernel32.MapViewOfFile
+        MapViewOfFile.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, ctypes.c_size_t]
+        MapViewOfFile.restype = ctypes.c_void_p
+
+        UnmapViewOfFile = ctypes.windll.kernel32.UnmapViewOfFile
+        UnmapViewOfFile.argtypes = [ctypes.c_void_p]
+        UnmapViewOfFile.restype = wintypes.BOOL
+
+        CloseHandle = ctypes.windll.kernel32.CloseHandle
+        CloseHandle.argtypes = [wintypes.HANDLE]
+        CloseHandle.restype = wintypes.BOOL
+
+        VirtualQuery = ctypes.windll.kernel32.VirtualQuery
+        class MEMORY_BASIC_INFORMATION(ctypes.Structure):
+            _fields_ = [
+                ("BaseAddress", ctypes.c_void_p),
+                ("AllocationBase", ctypes.c_void_p),
+                ("AllocationProtect", wintypes.DWORD),
+                ("RegionSize", ctypes.c_size_t),
+                ("State", wintypes.DWORD),
+                ("Protect", wintypes.DWORD),
+                ("Type", wintypes.DWORD),
+            ]
+
+        VirtualQuery.argtypes = [ctypes.c_void_p, ctypes.POINTER(MEMORY_BASIC_INFORMATION), ctypes.c_size_t]
+        VirtualQuery.restype = ctypes.c_size_t
+
+        FILE_MAP_READ = 0x0004
+        handle = OpenFileMappingW(FILE_MAP_READ, False, "AIDA64_SensorValues")
+        if not handle:
+            return ""
+
+        try:
+            view = MapViewOfFile(handle, FILE_MAP_READ, 0, 0, 0)
+            if not view:
+                return ""
+
+            try:
+                mbi = MEMORY_BASIC_INFORMATION()
+                size = VirtualQuery(ctypes.c_void_p(view), ctypes.byref(mbi), ctypes.sizeof(mbi))
+                if size == 0:
+                    return ""
+
+                max_len = int(min(mbi.RegionSize, 1024 * 1024))
+                raw = ctypes.string_at(view, max_len)
+                raw = raw.split(b"\x00", 1)[0]
+
+                try:
+                    return raw.decode("utf-8", errors="replace")
+                except Exception:
+                    return raw.decode("latin-1", errors="replace")
+            finally:
+                UnmapViewOfFile(ctypes.c_void_p(view))
+        finally:
+            CloseHandle(handle)
+    except Exception:
+        return ""
+
+
+def _aida_parse_values(text: str) -> dict[str, float]:
+    """解析 AIDA64 共享内存 XML 片段，提取传感器 ID->数值。
+
+    共享内存内容是 XML 标签片段（非完整 XML）。这里做宽松解析：
+    - 优先匹配 id="XXX" value="YYY" 的属性
+    - 其次匹配 <id>XXX</id> ... <value>YYY</value> 的结构
+    """
+    if not text:
+        return {}
+
+    values: dict[str, float] = {}
+
+    for m in re.finditer(r"\bid=\"(?P<id>[^\"]+)\"[^>]*\bvalue=\"(?P<val>[^\"]*)\"", text, re.IGNORECASE):
+        sid = m.group("id").strip()
+        val = _to_float_any(m.group("val"))
+        if sid and val is not None:
+            values[sid] = val
+
+    if values:
+        return values
+
+    for m in re.finditer(
+        r"<id>(?P<id>[^<]+)</id>.*?<value>(?P<val>[^<]*)</value>",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    ):
+        sid = m.group("id").strip()
+        val = _to_float_any(m.group("val"))
+        if sid and val is not None:
+            values[sid] = val
+
+    return values
+
+
+def _get_video_controller_names() -> list[str]:
+    if not _is_windows():
+        return []
+    script = (
+        "$ErrorActionPreference='SilentlyContinue';"
+        "Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name"
+    )
+    code, out, _ = _run_powershell(script, timeout=2.5)
+    if code != 0 or not out:
+        return []
+    names: list[str] = []
+    seen: set[str] = set()
+    for line in out.splitlines():
+        name = line.strip()
+        if not name:
+            continue
+        low = name.lower()
+        if "microsoft basic display" in low:
+            continue
+        if low in seen:
+            continue
+        seen.add(low)
+        names.append(name)
+    return names
+
+
+def _aida_collect_values() -> dict[str, float]:
+    # 共享内存（温度优先）
+    shared_text = _aida_shared_memory_text()
+    values = _aida_parse_values(shared_text)
+
+    # Registry（占用等，需在 AIDA64 External Applications 勾选 Registry）
+    reg = _aida_registry_values()
+    for k, v in reg.items():
+        fv = _to_float_any(v)
+        if fv is not None:
+            values.setdefault(k, fv)
+
+    # WMI（占用等，需在 AIDA64 External Applications 勾选 WMI）
+    need_ids = [_aida_cpu_util_id()]
+    for i in range(1, 13):
+        need_ids.append(_aida_gpu_util_id(i))
+        for tid in _aida_gpu_temp_ids(i):
+            need_ids.append(tid)
+    for tid in _aida_cpu_temp_ids():
+        need_ids.append(tid)
+
+    missing = [sid for sid in need_ids if sid not in values]
+    wmi = _aida_wmi_values(missing)
+    for k, v in wmi.items():
+        fv = _to_float_any(v)
+        if fv is not None:
+            values.setdefault(k, fv)
+
+    return values
+
+
+def _pick_first(values: dict[str, float], ids: list[str]) -> Optional[float]:
+    for sid in ids:
+        if sid in values:
+            return values[sid]
+    return None
 
 
 app = FastAPI(title="WinSysInfo Agent")
@@ -203,19 +532,49 @@ def status(authorization: Optional[str] = Header(default=None)) -> dict:
     mem_used = None
     mem_total = None
     cpu_temp_c = None
-    gpu_temp_c = None
-    gpu_util_percent = None
-    gpu_name = ""
 
-    hw_cpu_temp, hw_gpu_temp, hw_gpu_util, hw_gpu_name = _extract_hwinfo_metrics()
-    cpu_temp_c = hw_cpu_temp
-    gpu_temp_c = hw_gpu_temp
-    gpu_util_percent = hw_gpu_util
-    gpu_name = hw_gpu_name
+    provider = _provider()
+
+    gpus: list[dict] = []
+
+    if provider in {"auto", "aida64"}:
+        aida_values = _aida_collect_values()
+        cpu_percent = _pick_first(aida_values, [_aida_cpu_util_id()])
+        cpu_temp_c = _pick_first(aida_values, _aida_cpu_temp_ids())
+
+        names = _get_video_controller_names()
+        for i in range(1, 13):
+            util = _pick_first(aida_values, [_aida_gpu_util_id(i)])
+            temp = _pick_first(aida_values, _aida_gpu_temp_ids(i))
+            if util is None and temp is None:
+                continue
+
+            name = names[i - 1] if len(names) >= i else f"GPU{i}"
+            gpus.append(
+                {
+                    "name": name,
+                    "utilization_percent": util,
+                    "temperature_c": temp,
+                }
+            )
+
+    if provider in {"auto", "hwinfo"} and (cpu_temp_c is None and not gpus):
+        hw_cpu_temp, hw_gpu_temp, hw_gpu_util, hw_gpu_name = _extract_hwinfo_metrics()
+        cpu_temp_c = cpu_temp_c if cpu_temp_c is not None else hw_cpu_temp
+        if hw_gpu_temp is not None or hw_gpu_util is not None or hw_gpu_name:
+            gpus = [
+                {
+                    "name": hw_gpu_name or "GPU",
+                    "utilization_percent": hw_gpu_util,
+                    "temperature_c": hw_gpu_temp,
+                }
+            ]
 
     if psutil:
         try:
-            cpu_percent = float(psutil.cpu_percent(interval=0.2))
+            # 占用在“方案 2”里希望来自 AIDA64；这里仅在 AIDA64 未提供时回退。
+            if cpu_percent is None:
+                cpu_percent = float(psutil.cpu_percent(interval=0.2))
         except Exception:
             cpu_percent = None
 
@@ -236,16 +595,6 @@ def status(authorization: Optional[str] = Header(default=None)) -> dict:
         "mem_percent": mem_percent,
         "mem_used": mem_used,
         "mem_total": mem_total,
-        "gpus": (
-            [
-                {
-                    "name": gpu_name or "GPU",
-                    "utilization_percent": gpu_util_percent,
-                    "temperature_c": gpu_temp_c,
-                }
-            ]
-            if (gpu_temp_c is not None or gpu_util_percent is not None or gpu_name)
-            else []
-        ),
-        "note": "如需温度/显卡信息，建议启用 HWiNFO 传感器日志并配置 WINSYSINFO_HWINFO_LOG",
+        "gpus": gpus,
+        "note": "AIDA64 模式：温度来自共享内存；占用需开启 Registry 或 WMI 输出。",
     }

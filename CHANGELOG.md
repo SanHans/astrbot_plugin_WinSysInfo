@@ -18,6 +18,11 @@
 
 - 新增：远程 Agent 支持读取 HWiNFO 传感器日志（CSV），用于 CPU/GPU 温度与占用
 
+## v0.3.0
+
+- 新增：远程 Agent 支持 AIDA64 共享内存读取温度
+- 新增：远程 Agent 支持从 AIDA64 Registry/WMI 读取 CPU/GPU 占用（方案 2）
+
 ## v0.1.1
 
 - 新增：`CHANGELOG.md` 更新日志
