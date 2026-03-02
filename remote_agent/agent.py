@@ -585,6 +585,19 @@ def _pick_first(values: dict[str, float], ids: list[str]) -> Optional[float]:
     return None
 
 
+def _parse_aida_bustyp(text: str) -> tuple[Optional[float], Optional[int]]:
+    # 示例："PCI-E 3.0 x16 @ 3.0 x16"
+    text = (text or "").strip().lower()
+    if not text:
+        return None, None
+    m = re.search(r"pci-?e\s+(\d+(?:\.\d+)?)\s+x(\d+)", text)
+    if not m:
+        return None, None
+    gen = _to_float_any(m.group(1))
+    width = _to_int_any(m.group(2))
+    return gen, width
+
+
 def _nvidia_smi_query() -> list[dict]:
     """返回 nvidia-smi 查询结果（best effort）。
 
@@ -860,62 +873,67 @@ def status(authorization: Optional[str] = Header(default=None)) -> dict:
                 }
             )
 
-        # 1) 先把能匹配到的 NVIDIA（按显存已用）绑定到 nvidia-smi
         matched_aida: set[int] = set()
         used_non_nvidia_name = 0
 
+        # 1) NVIDIA：只要 nvidia-smi 有结果，就以 nvidia-smi 为准（占用/显存/温度）。
+        #    温度可以尝试用 AIDA64 的热点温度覆盖（需要能找到对应 AIDA index）。
         if smi:
             for s in smi:
-                smi_used = _to_float_any(s.get("memory_used_mib"))
-                if smi_used is None:
-                    continue
-                best = None
-                best_diff = None
-                for e in aida_gpu_entries:
-                    idx = int(e["index"])
-                    if idx in matched_aida:
-                        continue
-                    aida_used = _to_float_any(e.get("used_ded"))
-                    if aida_used is None:
-                        continue
-                    diff = abs(float(aida_used) - float(smi_used))
-                    if best_diff is None or diff < best_diff:
-                        best_diff = diff
-                        best = e
-                if best is None or best_diff is None or best_diff > 512:
-                    # 没找到对应的 AIDA 条目，直接用 nvidia-smi 输出一个 GPU
-                    gpus.append(
-                        {
-                            "name": str(s.get("name") or "NVIDIA GPU"),
-                            "utilization_percent": _to_float_any(s.get("utilization_percent")),
-                            "temperature_c": _to_float_any(s.get("temperature_c")),
-                            "memory_used_mib": _to_int_any(s.get("memory_used_mib")),
-                            "memory_total_mib": _to_int_any(s.get("memory_total_mib")),
-                        }
-                    )
-                    continue
+                mapped = None
+                s_gen = _to_float_any(s.get("pcie_gen_max"))
+                s_wid = _to_int_any(s.get("pcie_width_max"))
 
-                matched_aida.add(int(best["index"]))
+                # 优先用 BUSTYP 的 PCI-E gen/width 匹配 AIDA index
+                if s_gen is not None and s_wid is not None:
+                    for e in aida_gpu_entries:
+                        idx = int(e["index"])
+                        if idx in matched_aida:
+                            continue
+                        bustyp = str(aida_str.get(_aida_gpu_bus_type_id(idx), ""))
+                        a_gen, a_wid = _parse_aida_bustyp(bustyp)
+                        if a_gen == s_gen and a_wid == s_wid:
+                            mapped = e
+                            break
+
+                # 次选：按显存已用匹配（更严格，避免 AMD/USB 误匹配）
+                if mapped is None:
+                    s_used = _to_int_any(s.get("memory_used_mib"))
+                    if s_used is not None and s_used >= 1024:
+                        best = None
+                        best_diff = None
+                        for e in aida_gpu_entries:
+                            idx = int(e["index"])
+                            if idx in matched_aida:
+                                continue
+                            a_used = _to_int_any(e.get("used_ded"))
+                            if a_used is None:
+                                continue
+                            diff = abs(int(a_used) - int(s_used))
+                            if best_diff is None or diff < best_diff:
+                                best_diff = diff
+                                best = e
+                        if best is not None and best_diff is not None and best_diff <= 256:
+                            mapped = best
+
+                if mapped is not None:
+                    matched_aida.add(int(mapped["index"]))
+
+                hot_temp = None
+                if mapped is not None:
+                    hot_temp = _pick_first(aida_values, _aida_gpu_temp_ids(int(mapped["index"])))
+
                 gpus.append(
                     {
                         "name": str(s.get("name") or "NVIDIA GPU"),
-                        # 占用优先 AIDA（方案 2），没有就用 nvidia-smi
-                        "utilization_percent": best.get("util")
-                        if best.get("util") is not None
-                        else _to_float_any(s.get("utilization_percent")),
-                        # 温度优先 AIDA（热点温度），没有就用 nvidia-smi
-                        "temperature_c": best.get("temp")
-                        if best.get("temp") is not None
-                        else _to_float_any(s.get("temperature_c")),
-                        # 显存已用优先 AIDA（与匹配一致），总量用 nvidia-smi
-                        "memory_used_mib": _to_int_any(best.get("used_ded"))
-                        if best.get("used_ded") is not None
-                        else _to_int_any(s.get("memory_used_mib")),
+                        "utilization_percent": _to_float_any(s.get("utilization_percent")),
+                        "temperature_c": hot_temp if hot_temp is not None else _to_float_any(s.get("temperature_c")),
+                        "memory_used_mib": _to_int_any(s.get("memory_used_mib")),
                         "memory_total_mib": _to_int_any(s.get("memory_total_mib")),
                     }
                 )
 
-        # 2) 剩余 AIDA GPU 条目认为是非 NVIDIA（例如 AMD 核显/独显）
+        # 2) 非 NVIDIA：把剩余 AIDA GPU 条目按顺序绑定到非 NVIDIA 控制器名称
         for e in aida_gpu_entries:
             idx = int(e["index"])
             if idx in matched_aida:
