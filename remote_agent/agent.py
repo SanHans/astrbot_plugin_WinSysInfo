@@ -938,11 +938,10 @@ def status(authorization: Optional[str] = Header(default=None)) -> dict:
             idx = int(e["index"])
             if idx in matched_aida:
                 continue
-            name = (
-                non_nvidia_names[used_non_nvidia_name]
-                if used_non_nvidia_name < len(non_nvidia_names)
-                else f"GPU{idx}"
-            )
+            if used_non_nvidia_name >= len(non_nvidia_names):
+                # 没有可用的真实非 NVIDIA 显卡名称时，不输出占位 GPUx，避免出现不存在的显卡。
+                continue
+            name = non_nvidia_names[used_non_nvidia_name]
             used_non_nvidia_name += 1
             if _looks_like_virtual_gpu_name(name):
                 continue
@@ -955,6 +954,8 @@ def status(authorization: Optional[str] = Header(default=None)) -> dict:
                     "memory_total_mib": None,
                 }
             )
+
+        gpus = _merge_gpus_by_name(gpus)
 
     if provider in {"auto", "hwinfo"} and (cpu_temp_c is None and not gpus):
         hw_cpu_temp, hw_gpu_temp, hw_gpu_util, hw_gpu_name = _extract_hwinfo_metrics()
