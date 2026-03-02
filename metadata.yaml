@@ -2,5 +2,5 @@ name: winsysinfo
 display_name: WinSysInfo
 desc: 使用 /info 查看系统状态（处理器/内存/显卡占用与温度）。
 version: v0.1.0
-author: YourName
-repo: https://github.com/YourName/astrbot_plugin_WinSysInfo
+author: 你的名字
+repo: https://github.com/<你的用户名>/astrbot_plugin_WinSysInfo
