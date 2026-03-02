@@ -1,16 +1,9 @@
 {
-  "output_mode": {
-    "description": "输出方式",
-    "type": "string",
-    "options": ["文字", "图片"],
-    "default": "文字",
-    "hint": "选择图片时将本地渲染并发送系统状态图。"
-  },
   "title_text": {
     "description": "标题文字",
     "type": "string",
     "default": "系统状态",
-    "hint": "会显示在文字回复首行与图片顶部。"
+    "hint": "会显示在文字回复的第一行。"
   },
   "show_host": {
     "description": "显示主机名",

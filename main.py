@@ -24,6 +24,7 @@ except Exception:  # pragma: no cover
 
 @dataclass
 class CpuStats:
+    name: str = ""
     usage_percent: Optional[float] = None
     temperature_c: Optional[float] = None
 
@@ -81,6 +82,27 @@ def _get_creationflags() -> int:
     if os.name != "nt":
         return 0
     return getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+def _get_cpu_name() -> str:
+    if os.name == "nt":
+        try:
+            import winreg  # type: ignore
+
+            with winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE,
+                r"HARDWARE\DESCRIPTION\System\CentralProcessor\0",
+            ) as key:
+                value, _ = winreg.QueryValueEx(key, "ProcessorNameString")
+                return str(value).strip()
+        except Exception:
+            pass
+
+    try:
+        name = platform.processor()
+        return str(name).strip()
+    except Exception:
+        return ""
 
 
 async def _run_command(args: list[str], timeout: float = 2.5) -> tuple[int, str, str]:
@@ -336,25 +358,38 @@ async def _get_gpu_stats() -> list[GpuStats]:
 
 
 def _build_text_reply(
+    title_text: str,
     host: str,
     os_line: str,
     timestamp: Optional[str],
     cpu: Optional[CpuStats],
     memory: Optional[MemoryStats],
     gpus: list[GpuStats],
+    show_host: bool,
+    show_os: bool,
+    show_cpu_name: bool,
     show_cpu_usage: bool,
     show_cpu_temp: bool,
     show_memory: bool,
+    show_gpu_name: bool,
     show_gpu_usage: bool,
     show_gpu_temp: bool,
     show_gpu_memory: bool,
 ) -> str:
-    lines: list[str] = ["WinSysInfo 系统状态", f"主机：{host}", f"系统：{os_line}"]
+    title_text = title_text.strip() or "系统状态"
+    lines: list[str] = [title_text]
+    if show_host:
+        lines.append(f"主机：{host}")
+    if show_os:
+        lines.append(f"系统：{os_line}")
     if timestamp:
         lines.append(f"时间：{timestamp}")
 
-    if cpu and (show_cpu_usage or show_cpu_temp):
+    want_cpu_line = show_cpu_name or show_cpu_usage or show_cpu_temp
+    if cpu and want_cpu_line:
         cpu_parts: list[str] = []
+        if show_cpu_name and cpu.name:
+            cpu_parts.append(cpu.name)
         if show_cpu_usage:
             cpu_parts.append(f"占用 {_format_percent(cpu.usage_percent)}")
         if show_cpu_temp:
@@ -370,14 +405,14 @@ def _build_text_reply(
             mem_text += f" ({memory.percent:.0f}%)"
         lines.append(f"内存：{mem_text}")
 
-    want_gpu = show_gpu_usage or show_gpu_temp or show_gpu_memory
-    if want_gpu:
+    want_gpu_line = show_gpu_name or show_gpu_usage or show_gpu_temp or show_gpu_memory
+    if want_gpu_line:
         if not gpus:
             lines.append("显卡：暂无")
         else:
             for idx, gpu in enumerate(gpus):
                 parts: list[str] = []
-                if not (len(gpus) == 1 and gpu.name == "GPU"):
+                if show_gpu_name and not (len(gpus) == 1 and gpu.name == "GPU"):
                     parts.append(gpu.name)
                 if show_gpu_usage:
                     parts.append(f"占用 {_format_percent(gpu.utilization_percent)}")
@@ -749,7 +784,7 @@ def _build_image_data(
     "winsysinfo",
     "SanHans",
     "使用 /info 查看系统状态",
-    "0.1.0",
+    "0.1.1",
     "https://github.com/SanHans/astrbot_plugin_WinSysInfo",
 )
 class WinSysInfo(Star):
@@ -766,12 +801,14 @@ class WinSysInfo(Star):
         show_cpu_temp = bool(self.config.get("show_cpu_temp", True))
         show_memory = bool(self.config.get("show_memory", True))
         show_gpu_usage = bool(self.config.get("show_gpu_usage", True))
+        show_gpu_name = bool(self.config.get("show_gpu_name", True))
         show_gpu_temp = bool(self.config.get("show_gpu_temp", True))
         show_gpu_memory = bool(self.config.get("show_gpu_memory", True))
         show_timestamp = bool(self.config.get("show_timestamp", True))
-        output_mode_raw = str(self.config.get("output_mode", "文字")).strip()
-        output_mode = output_mode_raw.lower()
-        is_image = output_mode in {"image", "img", "pic", "png", "图片", "图", "图像"}
+        show_host = bool(self.config.get("show_host", True))
+        show_os = bool(self.config.get("show_os", True))
+        show_cpu_name = bool(self.config.get("show_cpu_name", True))
+        title_text = str(self.config.get("title_text", "系统状态"))
 
         host = socket.gethostname()
         os_line = f"{platform.system()} {platform.release()} ({platform.machine()})"
@@ -779,8 +816,8 @@ class WinSysInfo(Star):
             dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S") if show_timestamp else None
         )
 
-        want_cpu = show_cpu_usage or show_cpu_temp
-        want_gpu = show_gpu_usage or show_gpu_temp or show_gpu_memory
+        want_cpu = show_cpu_name or show_cpu_usage or show_cpu_temp
+        want_gpu = show_gpu_name or show_gpu_usage or show_gpu_temp or show_gpu_memory
 
         cpu_usage_task = _get_cpu_usage_percent() if show_cpu_usage else None
         cpu_temp_task = _get_cpu_temperature_c() if show_cpu_temp else None
@@ -801,48 +838,28 @@ class WinSysInfo(Star):
 
         cpu: Optional[CpuStats] = None
         if want_cpu:
+            cpu_name = _get_cpu_name() if show_cpu_name else ""
             cpu = CpuStats(
+                name=cpu_name,
                 usage_percent=float(cpu_usage) if cpu_usage is not None else None,
                 temperature_c=float(cpu_temp) if cpu_temp is not None else None,
             )
 
-        if is_image:
-            try:
-                image_data = _build_image_data(
-                    host=host,
-                    os_line=os_line,
-                    timestamp=timestamp,
-                    cpu=cpu,
-                    memory=memory,
-                    gpus=gpus,
-                    show_cpu_usage=show_cpu_usage,
-                    show_cpu_temp=show_cpu_temp,
-                    show_memory=show_memory,
-                    show_gpu_usage=show_gpu_usage,
-                    show_gpu_temp=show_gpu_temp,
-                    show_gpu_memory=show_gpu_memory,
-                )
-                image_path = await self.html_render(
-                    STATUS_TEMPLATE,
-                    image_data,
-                    return_url=False,
-                    options={"type": "png", "full_page": True},
-                )
-                yield event.image_result(image_path)
-                return
-            except Exception as exc:
-                logger.error(f"WinSysInfo 图片渲染失败: {exc!r}")
-
         text = _build_text_reply(
+            title_text=title_text,
             host=host,
             os_line=os_line,
             timestamp=timestamp,
             cpu=cpu,
             memory=memory,
             gpus=gpus,
+            show_host=show_host,
+            show_os=show_os,
+            show_cpu_name=show_cpu_name,
             show_cpu_usage=show_cpu_usage,
             show_cpu_temp=show_cpu_temp,
             show_memory=show_memory,
+            show_gpu_name=show_gpu_name,
             show_gpu_usage=show_gpu_usage,
             show_gpu_temp=show_gpu_temp,
             show_gpu_memory=show_gpu_memory,
