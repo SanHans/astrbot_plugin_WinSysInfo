@@ -23,6 +23,10 @@
 - 新增：远程 Agent 支持 AIDA64 共享内存读取温度
 - 新增：远程 Agent 支持从 AIDA64 Registry/WMI 读取 CPU/GPU 占用（方案 2）
 
+## v0.3.1
+
+- 修复：过滤 USB/虚拟显示适配器导致的显卡误识别
+
 ## v0.1.1
 
 - 新增：`CHANGELOG.md` 更新日志

@@ -13,6 +13,7 @@ import csv
 from pathlib import Path
 import re
 import shutil
+import json
 
 try:
     import psutil  # type: ignore
@@ -283,29 +284,95 @@ def _aida_parse_values(text: str) -> dict[str, float]:
 
 
 def _get_video_controller_names() -> list[str]:
+    return [c["name"] for c in _get_video_controllers()]
+
+
+def _get_video_controllers() -> list[dict]:
+    """返回 Win32_VideoController 列表（尽量只取有意义字段）。
+
+    每项：{name, pnp}
+    """
     if not _is_windows():
         return []
+
     script = (
         "$ErrorActionPreference='SilentlyContinue';"
-        "Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name"
+        "$x = Get-CimInstance Win32_VideoController | "
+        "Select-Object Name,PNPDeviceID | ConvertTo-Json -Compress;"
+        "if ($null -eq $x) { '' } else { $x }"
     )
     code, out, _ = _run_powershell(script, timeout=2.5)
     if code != 0 or not out:
         return []
-    names: list[str] = []
+
+    try:
+        parsed = json.loads(out)
+    except Exception:
+        return []
+
+    items = parsed if isinstance(parsed, list) else [parsed]
+    controllers: list[dict] = []
     seen: set[str] = set()
-    for line in out.splitlines():
-        name = line.strip()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("Name") or "").strip()
+        pnp = str(item.get("PNPDeviceID") or "").strip()
         if not name:
             continue
         low = name.lower()
         if "microsoft basic display" in low:
             continue
+        key = (name + "|" + pnp).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        controllers.append({"name": name, "pnp": pnp})
+    return controllers
+
+
+def _pci_gpu_names() -> list[str]:
+    names: list[str] = []
+    seen: set[str] = set()
+    for c in _get_video_controllers():
+        pnp = str(c.get("pnp") or "")
+        if not pnp.upper().startswith("PCI\\"):
+            continue
+        name = str(c.get("name") or "").strip()
+        if not name:
+            continue
+        low = name.lower()
         if low in seen:
             continue
         seen.add(low)
         names.append(name)
     return names
+
+
+def _merge_gpus_by_name(gpus: list[dict]) -> list[dict]:
+    merged: dict[str, dict] = {}
+    order: list[str] = []
+    for g in gpus:
+        if not isinstance(g, dict):
+            continue
+        name = str(g.get("name") or "GPU").strip() or "GPU"
+        key = name.lower()
+        if key not in merged:
+            merged[key] = {"name": name, "utilization_percent": None, "temperature_c": None}
+            order.append(key)
+
+        u = _to_float_any(g.get("utilization_percent"))
+        t = _to_float_any(g.get("temperature_c"))
+
+        cur_u = _to_float_any(merged[key].get("utilization_percent"))
+        cur_t = _to_float_any(merged[key].get("temperature_c"))
+
+        if u is not None:
+            merged[key]["utilization_percent"] = u if cur_u is None else max(cur_u, u)
+        if t is not None:
+            merged[key]["temperature_c"] = t if cur_t is None else max(cur_t, t)
+
+    return [merged[k] for k in order]
 
 
 def _aida_collect_values() -> dict[str, float]:

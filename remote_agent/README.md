@@ -76,6 +76,8 @@ Agent 默认会读取：
 - GPU 占用：`SGPU1UTI`（以及 `SGPU2UTI`...）
 - GPU 温度默认优先热点：`TGPU1HOT`
 
+显卡名称会优先从 Windows 的 `Win32_VideoController` 中选择 `PNPDeviceID` 以 `PCI\\` 开头的设备，避免把 USB/虚拟显示适配器当成显卡。
+
 可通过环境变量覆盖默认 ID 顺序：
 
 - `WINSYSINFO_AIDA64_CPU_TEMP_IDS`（逗号分隔）
