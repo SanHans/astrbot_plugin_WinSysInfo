@@ -1,5 +1,11 @@
 # 更新日志
 
+## v0.2.0
+
+- 新增：远程主机模式（HTTP Agent），支持 `/info <别名>`
+- 新增：`data_source`、`remote_hosts`、`remote_default_alias` 配置项
+- 变更：移除 `output_mode` 配置项（仅文字输出）
+
 ## v0.1.1
 
 - 新增：`CHANGELOG.md` 更新日志

@@ -5,6 +5,52 @@
     "default": "系统状态",
     "hint": "会显示在文字回复的第一行。"
   },
+  "data_source": {
+    "description": "数据来源",
+    "type": "string",
+    "options": ["本机", "远程"],
+    "default": "本机",
+    "hint": "选择远程时将从远程 Agent 拉取 /status 数据。"
+  },
+  "remote_hosts": {
+    "description": "远程主机列表",
+    "type": "template_list",
+    "default": [],
+    "hint": "配置一台或多台远程主机（局域网建议配合防火墙白名单与 Token）。",
+    "templates": {
+      "host": {
+        "name": "远程主机",
+        "items": {
+          "alias": {
+            "description": "别名",
+            "type": "string",
+            "default": ""
+          },
+          "url": {
+            "description": "URL",
+            "type": "string",
+            "default": "http://192.168.1.50:8765"
+          },
+          "token": {
+            "description": "Token（可选）",
+            "type": "string",
+            "default": ""
+          },
+          "enabled": {
+            "description": "启用",
+            "type": "bool",
+            "default": true
+          }
+        }
+      }
+    }
+  },
+  "remote_default_alias": {
+    "description": "默认远程别名",
+    "type": "string",
+    "default": "",
+    "hint": "当数据来源为远程且命令不带参数时，优先使用该别名。"
+  },
   "show_host": {
     "description": "显示主机名",
     "type": "bool",

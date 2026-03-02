@@ -21,6 +21,15 @@ try:
 except Exception:  # pragma: no cover
     psutil = None
 
+try:
+    import httpx  # type: ignore
+except Exception:  # pragma: no cover
+    httpx = None
+
+HTTPXError: type[Exception] = Exception
+if httpx:
+    HTTPXError = httpx.HTTPError
+
 
 @dataclass
 class CpuStats:
@@ -43,6 +52,14 @@ class GpuStats:
     temperature_c: Optional[float] = None
     memory_used_mib: Optional[int] = None
     memory_total_mib: Optional[int] = None
+
+
+@dataclass
+class RemoteHost:
+    alias: str
+    url: str
+    token: str = ""
+    enabled: bool = True
 
 
 def _clamp(value: float, low: float, high: float) -> float:
@@ -103,6 +120,165 @@ def _get_cpu_name() -> str:
         return str(name).strip()
     except Exception:
         return ""
+
+
+def _as_float(value: object) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        if isinstance(value, (int, float)):
+            return float(value)
+        return float(str(value))
+    except Exception:
+        return None
+
+
+def _as_int(value: object) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        if isinstance(value, (int, float)):
+            return int(float(value))
+        return int(float(str(value)))
+    except Exception:
+        return None
+
+
+def _normalize_status_url(url: str) -> str:
+    url = url.strip()
+    if not url:
+        return ""
+    if url.endswith("/"):
+        url = url[:-1]
+    if url.lower().endswith("/status"):
+        return url
+    return url + "/status"
+
+
+def _parse_remote_hosts(value: object) -> list[RemoteHost]:
+    if not isinstance(value, list):
+        return []
+    hosts: list[RemoteHost] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        alias = str(item.get("alias", "")).strip()
+        url = str(item.get("url", "")).strip()
+        if not alias or not url:
+            continue
+        hosts.append(
+            RemoteHost(
+                alias=alias,
+                url=url,
+                token=str(item.get("token", "")).strip(),
+                enabled=bool(item.get("enabled", True)),
+            )
+        )
+    return hosts
+
+
+async def _fetch_remote_status(url: str, token: str) -> dict:
+    if not httpx:
+        raise RuntimeError("缺少依赖 httpx，请检查 requirements.txt")
+
+    status_url = _normalize_status_url(url)
+    if not status_url:
+        raise RuntimeError("远程 URL 为空")
+
+    headers: dict[str, str] = {}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    timeout = httpx.Timeout(connect=2.0, read=3.0, write=2.0, pool=3.0)
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        resp = await client.get(status_url, headers=headers)
+        resp.raise_for_status()
+        data = resp.json()
+        if not isinstance(data, dict):
+            raise RuntimeError("远程返回不是 JSON 对象")
+        return data
+
+
+def _remote_payload_to_stats(payload: dict) -> tuple[str, str, Optional[str], Optional[CpuStats], Optional[MemoryStats], list[GpuStats]]:
+    host = str(payload.get("host") or payload.get("hostname") or "").strip()
+    os_line = str(payload.get("os") or payload.get("os_line") or "").strip()
+
+    timestamp = payload.get("timestamp") or payload.get("time")
+    timestamp_str: Optional[str] = None
+    if isinstance(timestamp, str):
+        timestamp_str = timestamp.strip() or None
+    elif isinstance(timestamp, (int, float)):
+        try:
+            timestamp_str = dt.datetime.fromtimestamp(float(timestamp)).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+        except Exception:
+            timestamp_str = None
+
+    cpu_obj = payload.get("cpu")
+    cpu_name = str(payload.get("cpu_name") or "").strip()
+    cpu_usage = _as_float(payload.get("cpu_percent") or payload.get("cpu_usage"))
+    cpu_temp = _as_float(payload.get("cpu_temp") or payload.get("cpu_temperature"))
+    if isinstance(cpu_obj, dict):
+        cpu_name = str(cpu_obj.get("name") or cpu_name).strip()
+        cpu_usage = _as_float(cpu_obj.get("usage_percent") or cpu_obj.get("percent") or cpu_usage)
+        cpu_temp = _as_float(cpu_obj.get("temperature_c") or cpu_obj.get("temp_c") or cpu_temp)
+
+    cpu: Optional[CpuStats] = None
+    if cpu_name or cpu_usage is not None or cpu_temp is not None:
+        cpu = CpuStats(name=cpu_name, usage_percent=cpu_usage, temperature_c=cpu_temp)
+
+    mem_obj = payload.get("memory")
+    mem_used = _as_int(payload.get("mem_used") or payload.get("memory_used"))
+    mem_total = _as_int(payload.get("mem_total") or payload.get("memory_total"))
+    mem_percent = _as_float(payload.get("mem_percent") or payload.get("memory_percent"))
+    if isinstance(mem_obj, dict):
+        mem_used = _as_int(mem_obj.get("used_bytes") or mem_obj.get("used") or mem_used)
+        mem_total = _as_int(mem_obj.get("total_bytes") or mem_obj.get("total") or mem_total)
+        mem_percent = _as_float(mem_obj.get("percent") or mem_percent)
+
+    memory: Optional[MemoryStats] = None
+    if mem_used is not None or mem_total is not None or mem_percent is not None:
+        memory = MemoryStats(used_bytes=mem_used, total_bytes=mem_total, percent=mem_percent)
+
+    gpus: list[GpuStats] = []
+    gpus_obj = payload.get("gpus")
+    if isinstance(gpus_obj, list):
+        for gpu_item in gpus_obj:
+            if not isinstance(gpu_item, dict):
+                continue
+            name = str(gpu_item.get("name") or gpu_item.get("gpu_name") or "GPU").strip() or "GPU"
+            util = _as_float(
+                gpu_item.get("utilization_percent")
+                or gpu_item.get("util")
+                or gpu_item.get("percent")
+            )
+            temp = _as_float(
+                gpu_item.get("temperature_c")
+                or gpu_item.get("temp_c")
+                or gpu_item.get("temperature")
+            )
+            mem_used_mib = _as_int(
+                gpu_item.get("memory_used_mib")
+                or gpu_item.get("mem_used_mib")
+                or gpu_item.get("vram_used_mib")
+            )
+            mem_total_mib = _as_int(
+                gpu_item.get("memory_total_mib")
+                or gpu_item.get("mem_total_mib")
+                or gpu_item.get("vram_total_mib")
+            )
+            gpus.append(
+                GpuStats(
+                    name=name,
+                    utilization_percent=util,
+                    temperature_c=temp,
+                    memory_used_mib=mem_used_mib,
+                    memory_total_mib=mem_total_mib,
+                )
+            )
+
+    return host, os_line, timestamp_str, cpu, memory, gpus
 
 
 async def _run_command(args: list[str], timeout: float = 2.5) -> tuple[int, str, str]:
@@ -396,12 +572,12 @@ def _build_text_reply(
             cpu_parts.append(f"温度 {_format_temp(cpu.temperature_c)}")
         lines.append("处理器：" + (" | ".join(cpu_parts) if cpu_parts else "暂无"))
 
-    if memory and show_memory:
-        if memory.used_bytes is not None and memory.total_bytes is not None:
+    if show_memory:
+        if memory and memory.used_bytes is not None and memory.total_bytes is not None:
             mem_text = f"{_format_bytes(memory.used_bytes)} / {_format_bytes(memory.total_bytes)}"
         else:
             mem_text = "暂无"
-        if memory.percent is not None:
+        if memory and memory.percent is not None:
             mem_text += f" ({memory.percent:.0f}%)"
         lines.append(f"内存：{mem_text}")
 
@@ -412,7 +588,7 @@ def _build_text_reply(
         else:
             for idx, gpu in enumerate(gpus):
                 parts: list[str] = []
-                if show_gpu_name and not (len(gpus) == 1 and gpu.name == "GPU"):
+                if show_gpu_name and gpu.name:
                     parts.append(gpu.name)
                 if show_gpu_usage:
                     parts.append(f"占用 {_format_percent(gpu.utilization_percent)}")
@@ -436,355 +612,11 @@ def _build_text_reply(
     return "\n".join(lines)
 
 
-STATUS_TEMPLATE = r"""<!doctype html>
-<html>
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <style>
-      :root {
-        --bg1: #0b1220;
-        --bg2: #0a2a2f;
-        --card: rgba(255, 255, 255, 0.08);
-        --card2: rgba(255, 255, 255, 0.10);
-        --text: rgba(255, 255, 255, 0.92);
-        --muted: rgba(255, 255, 255, 0.65);
-        --accent: #43d6b0;
-        --accent2: #4aa3ff;
-        --warn: #ffb020;
-        --danger: #ff5a6a;
-        --shadow: rgba(0, 0, 0, 0.35);
-      }
-
-      * { box-sizing: border-box; }
-
-      body {
-        margin: 0;
-        color: var(--text);
-        font-family: "Microsoft YaHei UI", "Microsoft YaHei", Bahnschrift, "Segoe UI", sans-serif;
-        background:
-          radial-gradient(1200px 600px at 10% 10%, rgba(67, 214, 176, 0.25), transparent 60%),
-          radial-gradient(900px 500px at 90% 20%, rgba(74, 163, 255, 0.22), transparent 55%),
-          radial-gradient(700px 500px at 50% 100%, rgba(255, 176, 32, 0.12), transparent 60%),
-          linear-gradient(180deg, var(--bg1), var(--bg2));
-      }
-
-      .wrap {
-        width: 980px;
-        padding: 28px 28px 30px;
-        margin: 0 auto;
-      }
-
-      .top {
-        display: flex;
-        justify-content: space-between;
-        gap: 16px;
-        margin-bottom: 18px;
-      }
-
-      .title {
-        font-size: 26px;
-        font-weight: 700;
-        letter-spacing: 0.4px;
-      }
-
-      .meta {
-        text-align: right;
-        color: var(--muted);
-        font-size: 12.5px;
-        line-height: 1.35;
-      }
-
-      .grid {
-        display: grid;
-        grid-template-columns: repeat(3, 1fr);
-        gap: 14px;
-      }
-
-      .card {
-        background: linear-gradient(180deg, var(--card2), var(--card));
-        border: 1px solid rgba(255, 255, 255, 0.10);
-        border-radius: 16px;
-        padding: 16px 16px 14px;
-        box-shadow: 0 14px 40px var(--shadow);
-        backdrop-filter: blur(10px);
-      }
-
-      .card-head {
-        display: flex;
-        justify-content: space-between;
-        align-items: baseline;
-        margin-bottom: 10px;
-      }
-
-      .card-title {
-        font-weight: 700;
-        letter-spacing: 0.3px;
-      }
-
-      .card-sub {
-        color: var(--muted);
-        font-size: 12px;
-        max-width: 220px;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-      }
-
-      .big {
-        font-size: 38px;
-        font-weight: 800;
-        letter-spacing: 0.3px;
-        margin: 2px 0 8px;
-      }
-
-      .row {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 8px;
-        align-items: center;
-        margin-bottom: 10px;
-      }
-
-      .pill {
-        border: 1px solid rgba(255, 255, 255, 0.14);
-        background: rgba(0, 0, 0, 0.18);
-        border-radius: 999px;
-        padding: 6px 10px;
-        font-size: 12px;
-        color: rgba(255, 255, 255, 0.82);
-      }
-
-      .bar {
-        height: 10px;
-        border-radius: 999px;
-        background: rgba(255, 255, 255, 0.10);
-        overflow: hidden;
-      }
-
-      .fill {
-        height: 100%;
-        border-radius: 999px;
-        background: linear-gradient(90deg, var(--accent), var(--accent2));
-        width: 0;
-      }
-
-      .fill.warm { background: linear-gradient(90deg, var(--warn), #ff6b1a); }
-      .fill.hot { background: linear-gradient(90deg, var(--danger), #ff2e49); }
-
-      .foot {
-        margin-top: 14px;
-        color: rgba(255, 255, 255, 0.50);
-        font-size: 11.5px;
-      }
-
-      .span-2 { grid-column: span 2; }
-      .span-3 { grid-column: span 3; }
-    </style>
-  </head>
-  <body>
-    <div class="wrap">
-      <div class="top">
-        <div>
-          <div class="title">{{ title }}</div>
-          <div class="meta">
-            {% if show_host %}{{ host }}{% endif %}
-            {% if show_host and show_os %}<br />{% endif %}
-            {% if show_os %}{{ os }}{% endif %}
-          </div>
-        </div>
-        <div class="meta">
-          {% if timestamp %}{{ timestamp }}{% endif %}
-        </div>
-      </div>
-
-      <div class="grid">
-        {% if cpu %}
-        <div class="card">
-          <div class="card-head">
-            <div class="card-title">处理器</div>
-            <div class="card-sub">{{ cpu.subtitle }}</div>
-          </div>
-          <div class="big">{{ cpu.usage_str }}</div>
-          <div class="row">
-            {% if cpu.temp_str %}<div class="pill">温度 {{ cpu.temp_str }}</div>{% endif %}
-          </div>
-          <div class="bar"><div class="fill {{ cpu.fill_class }}" style="width: {{ cpu.usage_pct }}%"></div></div>
-        </div>
-        {% endif %}
-
-        {% if memory %}
-        <div class="card">
-          <div class="card-head">
-            <div class="card-title">内存</div>
-            <div class="card-sub">{{ memory.detail }}</div>
-          </div>
-          <div class="big">{{ memory.usage_str }}</div>
-          <div class="row">
-            <div class="pill">已用 {{ memory.used_str }}</div>
-            <div class="pill">总计 {{ memory.total_str }}</div>
-          </div>
-          <div class="bar"><div class="fill {{ memory.fill_class }}" style="width: {{ memory.usage_pct }}%"></div></div>
-        </div>
-        {% endif %}
-
-        {% if gpus and gpus|length == 1 %}
-        {% set g = gpus[0] %}
-        <div class="card">
-          <div class="card-head">
-            <div class="card-title">显卡</div>
-            <div class="card-sub">{% if show_gpu_name %}{{ g.name }}{% else %}状态{% endif %}</div>
-          </div>
-          <div class="big">{{ g.util_str }}</div>
-          <div class="row">
-            {% if g.temp_str %}<div class="pill">温度 {{ g.temp_str }}</div>{% endif %}
-            {% if g.vram_str %}<div class="pill">显存 {{ g.vram_str }}</div>{% endif %}
-          </div>
-          <div class="bar"><div class="fill {{ g.fill_class }}" style="width: {{ g.util_pct }}%"></div></div>
-        </div>
-        {% endif %}
-
-        {% if gpus and gpus|length > 1 %}
-        <div class="card span-3">
-          <div class="card-head">
-            <div class="card-title">显卡</div>
-            <div class="card-sub">{{ gpus|length }} 张</div>
-          </div>
-          {% for g in gpus %}
-          <div style="margin-bottom: 12px;">
-            <div style="display:flex; justify-content:space-between; gap: 10px; align-items:baseline; margin-bottom:6px;">
-              <div style="font-weight:700;">{% if show_gpu_name %}{{ g.name }}{% else %}显卡{{ loop.index }}{% endif %}</div>
-              <div style="color: var(--muted); font-size: 12px;">占用 {{ g.util_str }}{% if g.temp_str %} | 温度 {{ g.temp_str }}{% endif %}{% if g.vram_str %} | 显存 {{ g.vram_str }}{% endif %}</div>
-            </div>
-            <div class="bar"><div class="fill {{ g.fill_class }}" style="width: {{ g.util_pct }}%"></div></div>
-          </div>
-          {% endfor %}
-        </div>
-        {% endif %}
-
-        {% if not cpu and not memory and (not gpus or gpus|length == 0) %}
-        <div class="card span-3">
-          <div class="card-head">
-            <div class="card-title">未启用任何指标</div>
-            <div class="card-sub">请在插件配置中启用需要展示的内容</div>
-          </div>
-          <div class="big">--</div>
-          <div class="foot">提示：在 WinSysInfo 配置页中启用处理器/内存/显卡开关。</div>
-        </div>
-        {% endif %}
-      </div>
-
-      <div class="foot">由 WinSysInfo 生成</div>
-    </div>
-  </body>
-</html>
-"""
-
-
-def _fill_class_for_percent(pct: int) -> str:
-    if pct >= 90:
-        return "hot"
-    if pct >= 75:
-        return "warm"
-    return ""
-
-
-def _build_image_data(
-    host: str,
-    os_line: str,
-    timestamp: Optional[str],
-    cpu: Optional[CpuStats],
-    memory: Optional[MemoryStats],
-    gpus: list[GpuStats],
-    show_cpu_usage: bool,
-    show_cpu_temp: bool,
-    show_memory: bool,
-    show_gpu_usage: bool,
-    show_gpu_temp: bool,
-    show_gpu_memory: bool,
-) -> dict:
-    data: dict = {
-        "host": host,
-        "os": os_line,
-        "timestamp": timestamp or "",
-        "cpu": None,
-        "memory": None,
-        "gpus": [],
-    }
-
-    if cpu and (show_cpu_usage or show_cpu_temp):
-        usage_pct = _percent_int(cpu.usage_percent) if show_cpu_usage else 0
-        data["cpu"] = {
-            "subtitle": f"{os.cpu_count() or '未知'} 核",
-            "usage_str": _format_percent(cpu.usage_percent) if show_cpu_usage else "--",
-            "usage_pct": usage_pct,
-            "temp_str": _format_temp(cpu.temperature_c) if show_cpu_temp else "",
-            "fill_class": _fill_class_for_percent(usage_pct),
-        }
-
-    if memory and show_memory:
-        usage_pct = _percent_int(memory.percent)
-        used_str = _format_bytes(memory.used_bytes) if memory.used_bytes is not None else "暂无"
-        total_str = _format_bytes(memory.total_bytes) if memory.total_bytes is not None else "暂无"
-        data["memory"] = {
-            "detail": "物理内存",
-            "usage_str": _format_percent(memory.percent),
-            "usage_pct": usage_pct,
-            "used_str": used_str,
-            "total_str": total_str,
-            "fill_class": _fill_class_for_percent(usage_pct),
-        }
-
-    want_gpu = show_gpu_usage or show_gpu_temp or show_gpu_memory
-    if want_gpu:
-        gpu_items: list[dict] = []
-        for gpu in gpus:
-            util_pct = _percent_int(gpu.utilization_percent) if show_gpu_usage else 0
-            vram_str = ""
-            if show_gpu_memory:
-                if gpu.memory_used_mib is not None and gpu.memory_total_mib is not None:
-                    pct = (
-                        (gpu.memory_used_mib / gpu.memory_total_mib) * 100
-                        if gpu.memory_total_mib > 0
-                        else 0.0
-                    )
-                    vram_str = f"{gpu.memory_used_mib}/{gpu.memory_total_mib} MiB ({pct:.0f}%)"
-                else:
-                    vram_str = "暂无"
-
-            gpu_items.append(
-                {
-                    "name": gpu.name,
-                    "util_str": _format_percent(gpu.utilization_percent) if show_gpu_usage else "--",
-                    "util_pct": util_pct,
-                    "temp_str": _format_temp(gpu.temperature_c) if show_gpu_temp else "",
-                    "vram_str": vram_str,
-                    "fill_class": _fill_class_for_percent(util_pct),
-                }
-            )
-
-        if not gpu_items:
-            gpu_items = [
-                {
-                    "name": "GPU",
-                    "util_str": "暂无" if show_gpu_usage else "--",
-                    "util_pct": 0,
-                    "temp_str": "暂无" if show_gpu_temp else "",
-                    "vram_str": "暂无" if show_gpu_memory else "",
-                    "fill_class": "",
-                }
-            ]
-
-        data["gpus"] = gpu_items
-
-    return data
-
-
 @register(
     "winsysinfo",
     "SanHans",
     "使用 /info 查看系统状态",
-    "0.1.1",
+    "0.2.0",
     "https://github.com/SanHans/astrbot_plugin_WinSysInfo",
 )
 class WinSysInfo(Star):
@@ -793,7 +625,7 @@ class WinSysInfo(Star):
         self.config = config or {}
 
     @filter.command("info")
-    async def info(self, event: AstrMessageEvent):
+    async def info(self, event: AstrMessageEvent, target: str = ""):
         """查看当前系统状态"""
         start = time.time()
 
@@ -809,6 +641,97 @@ class WinSysInfo(Star):
         show_os = bool(self.config.get("show_os", True))
         show_cpu_name = bool(self.config.get("show_cpu_name", True))
         title_text = str(self.config.get("title_text", "系统状态"))
+
+        data_source = str(self.config.get("data_source", "本机")).strip()
+        remote_default_alias = str(self.config.get("remote_default_alias", "")).strip()
+        remote_hosts = _parse_remote_hosts(self.config.get("remote_hosts", []))
+
+        target = (target or "").strip()
+        use_remote = bool(target) or data_source == "远程"
+
+        if use_remote:
+            try:
+                url = ""
+                token = ""
+                alias = ""
+
+                if "://" in target:
+                    url = target
+                else:
+                    alias = target or remote_default_alias
+                    if not alias:
+                        yield event.plain_result(
+                            "WinSysInfo：未指定远程主机。请在配置中添加远程主机，并设置默认远程别名，或使用 /info <别名>。"
+                        )
+                        return
+
+                    host_cfg = next(
+                        (h for h in remote_hosts if h.alias == alias),
+                        None,
+                    )
+                    if not host_cfg:
+                        yield event.plain_result(
+                            f"WinSysInfo：找不到远程主机别名「{alias}」。请检查插件配置。"
+                        )
+                        return
+                    if not host_cfg.enabled:
+                        yield event.plain_result(
+                            f"WinSysInfo：远程主机「{alias}」未启用。"
+                        )
+                        return
+                    url = host_cfg.url
+                    token = host_cfg.token
+
+                payload = await _fetch_remote_status(url=url, token=token)
+                r_host, r_os, r_ts, r_cpu, r_mem, r_gpus = _remote_payload_to_stats(payload)
+
+                host = r_host or alias or "远程主机"
+                os_line = r_os or ""
+                timestamp = r_ts if show_timestamp else None
+                if show_timestamp and not timestamp:
+                    timestamp = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+                want_cpu = show_cpu_name or show_cpu_usage or show_cpu_temp
+                want_gpu = show_gpu_name or show_gpu_usage or show_gpu_temp or show_gpu_memory
+                cpu = r_cpu if want_cpu else None
+                if want_cpu and cpu is None:
+                    cpu = CpuStats(name="")
+                memory = r_mem
+                gpus = r_gpus if want_gpu else []
+
+            except HTTPXError as exc:
+                logger.error(f"WinSysInfo 远程请求失败: {exc!r}")
+                yield event.plain_result("WinSysInfo：远程请求失败，请检查 URL/端口/网络与 Token。")
+                return
+            except Exception as exc:
+                logger.error(f"WinSysInfo 远程获取失败: {exc!r}")
+                yield event.plain_result("WinSysInfo：远程获取失败，请查看日志。")
+                return
+
+            text = _build_text_reply(
+                title_text=title_text,
+                host=host,
+                os_line=os_line,
+                timestamp=timestamp,
+                cpu=cpu,
+                memory=memory,
+                gpus=gpus,
+                show_host=show_host,
+                show_os=show_os,
+                show_cpu_name=show_cpu_name,
+                show_cpu_usage=show_cpu_usage,
+                show_cpu_temp=show_cpu_temp,
+                show_memory=show_memory,
+                show_gpu_name=show_gpu_name,
+                show_gpu_usage=show_gpu_usage,
+                show_gpu_temp=show_gpu_temp,
+                show_gpu_memory=show_gpu_memory,
+            )
+            yield event.plain_result(text)
+
+            elapsed_ms = int((time.time() - start) * 1000)
+            logger.info(f"WinSysInfo /info(远程) 处理完成: {elapsed_ms}ms")
+            return
 
         host = socket.gethostname()
         os_line = f"{platform.system()} {platform.release()} ({platform.machine()})"
