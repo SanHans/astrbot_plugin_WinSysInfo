@@ -14,6 +14,10 @@
 
 - 改进：Windows 下显卡兜底探测（WMI 显卡名称 + GPU Engine 占用）
 
+## v0.2.3
+
+- 新增：远程 Agent 支持读取 HWiNFO 传感器日志（CSV），用于 CPU/GPU 温度与占用
+
 ## v0.1.1
 
 - 新增：`CHANGELOG.md` 更新日志

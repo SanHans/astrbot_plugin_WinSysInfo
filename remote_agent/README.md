@@ -6,6 +6,7 @@
 
 - 支持绑定指定 IP 与端口（例如仅监听局域网网卡）
 - 可选 Token 鉴权（请求头 `Authorization: Bearer <token>`）
+- 可选：从 HWiNFO 传感器日志（CSV）读取 CPU/GPU 温度与显卡占用
 
 ## 安装
 
@@ -29,6 +30,12 @@ py -m pip install -r requirements.txt
 run.bat 192.168.1.50 8765 你的token
 ```
 
+带 HWiNFO 日志路径（可选）：
+
+```bat
+run.bat 192.168.1.50 8765 你的token "C:\path\hwinfo.csv"
+```
+
 方式二：手动启动
 
 ```bash
@@ -40,6 +47,30 @@ python -m uvicorn agent:app --host 192.168.1.50 --port 8765
 
 - `GET /health`：探活
 - `GET /status`：返回状态 JSON
+
+## HWiNFO 传感器日志（推荐）
+
+如果你希望拿到更可靠的 CPU/GPU 温度与显卡占用，建议用 HWiNFO 的「传感器日志」功能输出 CSV，然后让 Agent 读取。
+
+大致步骤：
+
+1) 打开 HWiNFO（传感器窗口）
+2) 打开日志输出（CSV），设置一个固定的日志文件路径
+3) 将该日志文件路径传给 Agent：
+   - 通过 `run.bat` 的第 4 个参数，或
+   - 设置环境变量 `WINSYSINFO_HWINFO_LOG`
+
+Agent 会从 CSV 最后一行尝试解析：
+
+- 处理器温度：优先匹配 `CPU Package`、`CPU (Tctl/Tdie)` 等列
+- 显卡温度：优先匹配 `GPU Temperature`、`GPU Hot Spot` 等列
+- 显卡占用：优先匹配 `GPU Core Load`、`GPU Utilization` 等列
+
+如果你的列名不同，可以用环境变量自定义关键词（逗号分隔）：
+
+- `WINSYSINFO_HWINFO_CPU_TEMP_KEYS`
+- `WINSYSINFO_HWINFO_GPU_TEMP_KEYS`
+- `WINSYSINFO_HWINFO_GPU_UTIL_KEYS`
 
 示例：
 

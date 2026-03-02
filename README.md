@@ -35,6 +35,8 @@
 
 仓库已内置远程 Agent 示例代码：`winsysinfo/remote_agent/`。
 
+提示：如果你希望远程侧也能拿到更可靠的 CPU/GPU 温度与显卡占用，建议在远程主机安装并运行 HWiNFO，并启用传感器日志（CSV），然后将日志路径传给 Agent（见 `winsysinfo/remote_agent/README.md`）。
+
 - 建议仅监听局域网 IP（例如 `--host 192.168.1.50 --port 8765`），并在防火墙中仅放行内网网段。
 - 如果启用 Token，请求头使用：`Authorization: Bearer <token>`。
 

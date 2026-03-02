@@ -695,7 +695,7 @@ def _build_text_reply(
     "winsysinfo",
     "SanHans",
     "使用 /info 查看系统状态",
-    "0.2.2",
+    "0.2.3",
     "https://github.com/SanHans/astrbot_plugin_WinSysInfo",
 )
 class WinSysInfo(Star):
